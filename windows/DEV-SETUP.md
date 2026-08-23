@@ -73,18 +73,79 @@ In Visual Studio, confirm the WinUI template exists: **Create a new project** �
 "WinUI" → you should see **"Blank App, Packaged (WinUI 3 in Desktop)"**. If it's there, the
 WinUI toolchain is complete.
 
-## Step 4 — Get the Mac code over as reference (optional but recommended)
+## Step 4 — Set up git over SSH and clone the monorepo
 
-The Swift code won't build on Windows, but you'll port algorithms from it (`Engine.swift`,
-`MarkdownWriter.swift`, `TranscriptIndex.swift`, `SelfTest.swift`). Only `Sources/` (~0.5 MB)
-and the top-level `*.md` design docs matter — not the 2 GB of build output.
+The project is one **monorepo** — `git@github.com:samshend/Transcriber.git` — with `mac/`
+(the Swift app, your porting reference) and `windows/` (this .NET app) side by side. Clone it
+once and you have both. Set up SSH first.
 
-Cleanest: a **private GitHub repo** cloned on both machines. (Ask Claude on the Mac to set
-this up — `git init` + a `.gitignore` for build output/models + push.) Then on Windows:
+Run these in **PowerShell**.
+
+**1. Confirm OpenSSH is present** (ships with Windows 10/11 and Git for Windows):
 
 ```powershell
-git clone <private-repo-url> Transcriber-mac-ref
+ssh -V
 ```
+
+**2. Generate a key** — Enter for the default path, Enter twice for no passphrase:
+
+```powershell
+ssh-keygen -t ed25519 -C "samshend windows"
+```
+
+**3. Enable ssh-agent** (disabled by default on Windows). Run this block in **PowerShell as
+Administrator**:
+
+```powershell
+Get-Service ssh-agent | Set-Service -StartupType Automatic
+Start-Service ssh-agent
+```
+
+Then back in a **normal** PowerShell, load the key:
+
+```powershell
+ssh-add $env:USERPROFILE\.ssh\id_ed25519
+```
+
+**4. Copy the public key:**
+
+```powershell
+Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub | Set-Clipboard
+```
+
+**5. Add it to the `samshend` account** — in a browser signed in as **`samshend`** (the repo
+owner, *not* `samshendjb`): <https://github.com/settings/keys> → **New SSH key** → paste →
+**Add SSH key**.
+
+**6. Verify** — you must see `Hi samshend!`; if it says `samshendjb` or denies you, the key
+landed on the wrong account:
+
+```powershell
+ssh -T git@github.com
+```
+
+**7. Clone:**
+
+```powershell
+cd $env:USERPROFILE\workspace   # md workspace first if it doesn't exist
+git clone git@github.com:samshend/Transcriber.git
+cd Transcriber
+```
+
+**8. Line endings** — this repo is edited on both macOS and Windows, so keep LF in the repo
+(a `.gitattributes` in the repo enforces this, but set the client too):
+
+```powershell
+git config --global core.autocrlf input
+```
+
+The Windows solution is `windows/Transcriber.slnx`; open it in Visual Studio. The Swift code
+you'll port from is under `mac/Sources/Transcriber/` (`Engine.swift`, `MarkdownWriter.swift`,
+`TranscriptIndex.swift`, `SelfTest.swift`).
+
+> **Troubleshooting:** if `ssh -T` hangs or picks the wrong key, Git for Windows may be using
+> its own bundled ssh. Force the Windows one:
+> `git config --global core.sshCommand "C:/Windows/System32/OpenSSH/ssh.exe"`
 
 ## Step 5 — First build smoke test
 

@@ -1,0 +1,23 @@
+# Normalize line endings across macOS and Windows checkouts.
+# Text files are stored as LF in the repo; Windows working copies may see CRLF,
+# but nothing gets rewritten in-repo, so mac/Scripts/*.sh stay runnable.
+* text=auto eol=lf
+
+# Scripts must stay LF regardless of platform (CRLF breaks shebang execution).
+*.sh    text eol=lf
+*.ps1   text eol=crlf
+
+# Source and docs — explicit LF.
+*.swift text eol=lf
+*.cs    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.plist text eol=lf
+*.xml   text eol=lf
+
+# Binary assets — never touch.
+*.icns  binary
+*.png   binary
+*.bin   binary
+*.dmg   binary
+*.zip   binary
