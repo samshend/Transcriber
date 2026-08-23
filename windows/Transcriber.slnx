@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Transcriber.Cli/Transcriber.Cli.csproj" />
+    <Project Path="src/Transcriber.Core/Transcriber.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Transcriber.Core.Tests/Transcriber.Core.Tests.csproj" />
+  </Folder>
+</Solution>

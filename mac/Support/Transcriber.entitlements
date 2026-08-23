@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Hardened-runtime entitlements for Developer ID (notarized) distribution — NOT the App
+	  Store sandbox. Microphone access is required for recording; the Info.plist usage strings
+	  supply the consent prompts. All bundled dylibs and helper binaries are signed with the
+	  same Developer ID, so Library Validation stays on (no disable-library-validation needed).
+	-->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<!-- Send Apple Events to browsers to read their open tabs (meeting-end detection). -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+</dict>
+</plist>
