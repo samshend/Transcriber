@@ -79,7 +79,9 @@ public static class MarkdownWriter
         return string.Join("\n\n", parts);
     }
 
-    private static string Escape(string value) => value.Replace("\"", "\\\"");
+    // YAML double-quoted scalars treat backslashes as escape prefixes. Windows paths therefore
+    // need their separators escaped as well as literal quotes.
+    private static string Escape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 }
 
 /// <summary>

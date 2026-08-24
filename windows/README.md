@@ -3,6 +3,9 @@
 Native Windows build for the legal/immigration market. Separate codebase from the macOS app,
 sharing a **format contract** rather than code — see `FORMAT.md`.
 
+See [FEATURE-GAPS.md](FEATURE-GAPS.md) for the source-audited macOS parity matrix and the
+recording-first Windows delivery plan.
+
 **Target user:** a client-facing consultant at a Spain immigration firm. Teams/Zoom/Meet calls
 on her PC, no meeting tooling today, manual notes, client follow-up by email. What she needs,
 in her words: an accurate verbatim record of *"что нам конкретно сказал клиент"* (clients say
@@ -22,8 +25,8 @@ investment — not local summarisation.
 | **Projects & library** — `LibraryStore`, projects, ingest-copy-in, move, rename, export, delete, migration | **done, verified end-to-end** (transcribe → ingest → project) |
 | `Transcriber.Cli` — headless driver (incl. `--library`/`--project`) | **done, verified on real audio** |
 | Format parity with the macOS app | **verified** — output parses correctly through the Mac MCP server |
-| `Transcriber.App` — WinUI 3 GUI (3-column: projects / list / detail + audio player + drag-drop) | not started; needs the VM |
-| Recording — WASAPI mic + loopback | not started; needs the VM |
+| `Transcriber.App` — WinUI 3 GUI (3-column: projects / list / detail + audio player + drag-drop) | **builds cleanly on Windows**; launch/UI testing in progress |
+| Recording — WASAPI mic + loopback | **first vertical slice implemented and hardware-tested**; reliability hardening remains |
 | Diarization (speaker labels) | deferred; see "Known gaps" |
 
 **42 xUnit tests green on macOS** (`dotnet test`), covering merging, whisper flags/JSON, and the
@@ -32,9 +35,8 @@ model and transcript format (FORMAT contract), so the two products read each oth
 
 ## The WinUI app (`src/Transcriber.App`)
 
-The GUI is written but **has never been compiled** — WinUI needs MSBuild + the Windows App SDK,
-which only exist on Windows, and no VM is set up yet. It is deliberately **kept out of
-`Transcriber.sln`** so `dotnet test` keeps working on macOS; build it on Windows directly.
+The GUI is written and now **compiles cleanly on Windows**. It is deliberately kept out of the
+cross-platform solution so `dotnet test` remains portable; build it on Windows directly.
 
 What it implements (all wired to the verified `Transcriber.Core`):
 - Three-column layout: projects sidebar · transcript list · detail pane.
@@ -44,8 +46,9 @@ What it implements (all wired to the verified `Transcriber.Core`):
 - **Drag** a transcript from the list onto a project (or Unsorted) in the sidebar to file it.
 - Project **badges** in the "All" view, and per-item Export / Rename / Delete / Open.
 
-Not included yet (needs the VM / real hardware): **recording** (WASAPI mic + loopback) and
-diarization.
+Recording now captures default mic + system loopback, supports pause/resume/discard, retains
+separate source tracks, finalizes through FFmpeg, and automatically transcribes. It still needs
+long-call/device-change reliability hardening. Diarization is not included yet.
 
 ### Building it on Windows (inside the VM)
 
@@ -91,7 +94,7 @@ the pipeline lives there and the UI is kept thin.
    and the .NET 10 SDK. Verify the exact winget package ID before scripting it
    (`winget search "Visual Studio"`) — do not assume the 2022 ID pattern still applies.
 4. **Assets:** from the repo's `Windows` folder run
-   `powershell -ExecutionPolicy Bypass -File scripts\fetch-assets.ps1`.
+   `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\fetch-assets.ps1`.
 5. **Smoke test:** `dotnet run --project src\Transcriber.Cli -- <some.m4a> --language ru`.
    This exercises the whole pipeline with no UI, so it isolates tool/asset problems from UI ones.
 

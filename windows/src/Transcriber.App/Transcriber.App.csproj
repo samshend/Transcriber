@@ -17,6 +17,7 @@
     <Platforms>x64;arm64</Platforms>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <UseWinUI>true</UseWinUI>
+    <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <WindowsPackageType>None</WindowsPackageType>
@@ -25,13 +26,23 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.240923002" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
+    <PackageReference Include="NAudio" Version="3.0.1" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Transcriber.Core\Transcriber.Core.csproj" />
+  </ItemGroup>
+
+  <!-- Runtime assets are fetched into windows/bin and windows/models by scripts/fetch-assets.ps1. -->
+  <ItemGroup>
+    <Content Include="..\..\bin\ffmpeg.exe" Link="bin\ffmpeg.exe" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\bin\whisper-cli.exe" Link="bin\whisper-cli.exe" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\bin\*.dll" Link="bin\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\models\ggml-large-v3-turbo-q5_0.bin" Link="models\ggml-large-v3-turbo-q5_0.bin" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\models\ggml-silero-v5.1.2.bin" Link="models\ggml-silero-v5.1.2.bin" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -154,7 +154,13 @@ public sealed partial class LibraryViewModel : ObservableObject
     /// Transcribes an imported file and files it into the current project (or Unsorted). Runs the
     /// verified Core pipeline on a background thread; the caller marshals UI updates.
     /// </summary>
-    public async Task ImportAsync(string sourcePath, ToolPaths tools, string language, string? vocabulary)
+    public async Task ImportAsync(
+        string sourcePath,
+        ToolPaths tools,
+        string language,
+        string? vocabulary,
+        string? recordingWarning = null,
+        IReadOnlyList<string>? tracks = null)
     {
         IsBusy = true;
         StatusMessage = $"Transcribing {Path.GetFileName(sourcePath)}…";
@@ -171,6 +177,8 @@ public sealed partial class LibraryViewModel : ObservableObject
                     SourcePath = sourcePath,
                     Language = language,
                     Vocabulary = vocabulary,
+                    RecordingWarning = recordingWarning,
+                    Tracks = tracks ?? [],
                     OutputDirectory = workDir,
                 })).ConfigureAwait(true);
 

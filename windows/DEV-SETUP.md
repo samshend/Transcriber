@@ -35,7 +35,7 @@ Open **PowerShell as Administrator** and run these (`winget` ships with Windows 
 
 ```powershell
 winget install Git.Git
-winget install Microsoft.DotNet.SDK.9
+winget install Microsoft.DotNet.SDK.10
 winget install Microsoft.VisualStudio.2022.Community `
   --override "--add Microsoft.VisualStudio.Workload.ManagedDesktop --add Microsoft.VisualStudio.ComponentGroup.WindowsAppSDK.Cs --includeRecommended"
 winget install OpenJS.NodeJS.LTS
@@ -45,7 +45,8 @@ winget install Gyan.FFmpeg
 What each is for:
 
 - **Git** — version control / syncing the Mac reference code.
-- **.NET 9 SDK** — the language + build system the app is written in.
+- **.NET 10 SDK** — the language + build system the app is written in. The repository's
+  `global.json` accepts the latest installed .NET 10 feature band.
 - **Visual Studio 2022 Community** with two pieces:
   - *ManagedDesktop* workload — .NET desktop development.
   - *WindowsAppSDK.Cs* component — the **WinUI 3** project templates and Windows App SDK.
@@ -63,7 +64,7 @@ claude        # sign in
 ## Step 3 — Verify everything
 
 ```powershell
-dotnet --version      # 9.x.x
+dotnet --version      # 10.x.x
 git --version
 node --version
 claude --version

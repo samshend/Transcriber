@@ -7,15 +7,67 @@
     xmlns:mux="using:Microsoft.UI.Xaml.Controls"
     Title="Transcriber">
 
-    <Grid ColumnSpacing="0">
+    <Grid ColumnSpacing="0" DataContext="{x:Bind Vm}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="210" />
             <ColumnDefinition Width="320" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
+        <!-- Primary actions and live recording state. Recording is intentionally impossible to
+             miss: while active, controls replace the idle toolbar across the whole window. -->
+        <Border Grid.Row="0" Grid.ColumnSpan="3"
+                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,0,1"
+                Background="{ThemeResource LayerFillColorAltBrush}" Padding="12,8">
+            <Grid>
+                <StackPanel x:Name="IdleRecordingControls" Orientation="Horizontal" Spacing="10">
+                    <Button Click="StartRecording_Click" ToolTipService.ToolTip="Record microphone and system audio">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <FontIcon Glyph="&#xEA3A;" Foreground="Red" FontSize="16" />
+                            <TextBlock Text="Record" FontWeight="SemiBold" />
+                        </StackPanel>
+                    </Button>
+                    <TextBlock Text="Record a meeting or conversation" VerticalAlignment="Center"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="{Binding StatusMessage, Mode=OneWay}" VerticalAlignment="Center"
+                               Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                </StackPanel>
+
+                <Grid x:Name="ActiveRecordingControls" Visibility="Collapsed" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="130" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon x:Name="RecordingDot" Glyph="&#xEA3A;" Foreground="Red" FontSize="16"
+                              VerticalAlignment="Center" />
+                    <TextBlock x:Name="RecordingTime" Grid.Column="1" Text="00:00" FontWeight="SemiBold"
+                               VerticalAlignment="Center" />
+                    <ProgressBar x:Name="MicLevel" Grid.Column="2" Minimum="0" Maximum="100" Value="0"
+                                 VerticalAlignment="Center" Height="8" />
+                    <StackPanel Grid.Column="3" VerticalAlignment="Center">
+                        <TextBlock x:Name="RecordingSource" Text="Microphone + system audio" />
+                        <TextBlock x:Name="RecordingWarningText" Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                   FontSize="11" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                    <Button x:Name="PauseRecordingButton" Grid.Column="4" Click="PauseRecording_Click" Content="Pause" />
+                    <Button x:Name="DiscardRecordingButton" Grid.Column="5" Click="DiscardRecording_Click" Content="Discard" />
+                    <Button x:Name="StopRecordingButton" Grid.Column="6" Click="StopRecording_Click"
+                            Content="Stop &amp; transcribe" Style="{ThemeResource AccentButtonStyle}" />
+                </Grid>
+            </Grid>
+        </Border>
+
         <!-- Column 0: projects sidebar -->
-        <Grid Grid.Column="0" Background="{ThemeResource LayerFillColorDefaultBrush}">
+        <Grid Grid.Row="1" Grid.Column="0" Background="{ThemeResource LayerFillColorDefaultBrush}">
             <Grid.RowDefinitions>
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
@@ -44,7 +96,7 @@
         </Grid>
 
         <!-- Column 1: transcript list -->
-        <Grid Grid.Column="1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1,0">
+        <Grid Grid.Row="1" Grid.Column="1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1,0">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -68,7 +120,7 @@
             </Grid>
 
             <ProgressBar Grid.Row="1" IsIndeterminate="True"
-                         Visibility="{x:Bind Vm.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVis}}" />
+                         Visibility="{Binding IsBusy, Mode=OneWay, Converter={StaticResource BoolToVis}}" />
 
             <ListView x:Name="ItemsList"
                       Grid.Row="2"
@@ -90,7 +142,7 @@
                             <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
                                 <TextBlock Text="{x:Bind Subtitle}" Style="{ThemeResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <Border Visibility="{x:Bind ShowProjectBadge, Converter={StaticResource BoolToVis}}"
+                                <Border Visibility="{Binding ShowProjectBadge, Converter={StaticResource BoolToVis}}"
                                         Background="{ThemeResource AccentFillColorSecondaryBrush}"
                                         CornerRadius="8" Padding="6,1">
                                     <TextBlock Text="{x:Bind ProjectName, Mode=OneWay}"
@@ -99,7 +151,7 @@
                                 </Border>
                                 <FontIcon Glyph="&#xE7BA;" FontSize="12"
                                           Foreground="{ThemeResource SystemFillColorCautionBrush}"
-                                          Visibility="{x:Bind HasWarning, Converter={StaticResource BoolToVis}}" />
+                                          Visibility="{Binding HasWarning, Converter={StaticResource BoolToVis}}" />
                             </StackPanel>
                             <Grid.ContextFlyout>
                                 <MenuFlyout>
@@ -108,7 +160,7 @@
                                         <MenuFlyoutItem Text="Save Transcript to Downloads" Click="ExportTranscriptDownloads_Click" />
                                         <MenuFlyoutItem Text="Save Transcript As…" Click="ExportTranscriptAs_Click" />
                                         <MenuFlyoutItem Text="Save Audio to Downloads" Click="ExportAudioDownloads_Click"
-                                                        Visibility="{x:Bind HasAudio, Converter={StaticResource BoolToVis}}" />
+                                                        Visibility="{Binding HasAudio, Converter={StaticResource BoolToVis}}" />
                                     </MenuFlyoutSubItem>
                                     <MenuFlyoutItem Text="Rename…" Click="Rename_Click" />
                                     <MenuFlyoutSeparator />
@@ -122,7 +174,7 @@
         </Grid>
 
         <!-- Column 2: detail -->
-        <ScrollViewer Grid.Column="2">
+        <ScrollViewer Grid.Row="1" Grid.Column="2">
             <StackPanel Padding="20" Spacing="12">
                 <TextBlock x:Name="DetailTitle" Style="{ThemeResource TitleTextBlockStyle}"
                            IsTextSelectionEnabled="True" TextWrapping="Wrap" />
@@ -133,7 +185,15 @@
                 <MediaPlayerElement x:Name="AudioPlayer"
                                     AreTransportControlsEnabled="True"
                                     Visibility="Collapsed"
-                                    MaxHeight="60" />
+                                    Height="96">
+                    <MediaPlayerElement.TransportControls>
+                        <!-- WinUI's full transport layout includes the seek/progress bar,
+                             elapsed/remaining time, play/pause, and volume controls. -->
+                        <MediaTransportControls IsCompact="False" />
+                    </MediaPlayerElement.TransportControls>
+                </MediaPlayerElement>
+                <InfoBar x:Name="PlaybackError" Severity="Error" IsOpen="False"
+                         IsClosable="True" Title="Audio playback failed" />
 
                 <TextBlock x:Name="DetailBody" TextWrapping="Wrap" IsTextSelectionEnabled="True"
                            LineHeight="24" />

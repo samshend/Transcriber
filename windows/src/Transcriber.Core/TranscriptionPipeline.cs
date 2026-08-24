@@ -38,6 +38,8 @@ public sealed record TranscriptionRequest
     public required string SourcePath { get; init; }
     public string Language { get; init; } = "auto";
     public string? Vocabulary { get; init; }
+    public string? RecordingWarning { get; init; }
+    public IReadOnlyList<string> Tracks { get; init; } = [];
     /// <summary>Where the .md and .html go. Defaults to the source file's folder.</summary>
     public string? OutputDirectory { get; init; }
 }
@@ -124,6 +126,8 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
                 DurationSeconds = duration,
                 Model = "large-v3-turbo",
                 Language = recognised.Language ?? request.Language,
+                RecordingWarning = request.RecordingWarning,
+                Tracks = request.Tracks,
             };
 
             var directory = request.OutputDirectory ?? source.DirectoryName!;
