@@ -448,7 +448,7 @@ final class AppState: ObservableObject {
         let watcher = MeetingWatcher.standard(
             browserEnabled: detectBrowserMeetings,
             audioEnabled: detectSilenceFallback,
-            silenceSeconds: { [weak self] in self?.recorder.systemSilenceSeconds ?? .greatestFiniteMagnitude }
+            silenceSeconds: { [weak self] in self?.recorder.meetingSilenceSeconds ?? .greatestFiniteMagnitude }
         )
         meetingWatcher = watcher
         watcher.start { [weak self] in self?.handleMeetingEnded() }

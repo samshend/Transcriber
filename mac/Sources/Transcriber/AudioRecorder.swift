@@ -42,10 +42,17 @@ final class AudioRecorder: ObservableObject {
     private var finalURL: URL?
     private var systemTap: SystemAudioTap?
 
-    /// Seconds the captured system audio has been silent — feeds the meeting-end silence
-    /// detector. Very large when there is no system-audio capture, so silence-detection simply
-    /// never fires in mic-only recordings.
+    /// Seconds the captured system audio has been silent. Very large when there is no
+    /// system-audio capture. On its own this is NOT a "meeting ended" signal — see
+    /// `meetingSilenceSeconds`.
     var systemSilenceSeconds: TimeInterval { systemTap?.secondsSinceAudible ?? .greatestFiniteMagnitude }
+    /// Seconds the microphone has been silent (below the speech floor). Very large before capture.
+    var micSilenceSeconds: TimeInterval { micWriter?.secondsSinceAudible ?? .greatestFiniteMagnitude }
+    /// Seconds since EITHER channel was last audible — the real "the call went quiet" signal that
+    /// feeds the meeting-end detector. Watching only system audio wrongly ended calls recorded
+    /// through the mic (phone on speaker, in-person), where nothing ever plays through the laptop
+    /// and the system channel is silent throughout while the person is clearly still talking.
+    var meetingSilenceSeconds: TimeInterval { min(systemSilenceSeconds, micSilenceSeconds) }
     private var systemURL: URL?
 
     private var watchdogTask: Task<Void, Never>?
@@ -482,6 +489,14 @@ private final class MicWriter: @unchecked Sendable {
     private var _paused = false
     private var _dropped = 0
     private var _lastBufferAt = Date()
+    /// Last time the mic rose above the speech floor. Feeds the meeting-end detector so a call
+    /// captured through the mic (phone on speaker, in-person) is never judged "ended" just
+    /// because nothing is playing through the laptop's own speakers.
+    private var _lastAudibleAt = Date()
+    /// RMS below this is treated as room tone, not speech (~ -40 dBFS). Higher than the system
+    /// tap's floor (0.003) because a mic always picks up ambient noise; only real speech should
+    /// count as "someone is still talking".
+    private static let audibleFloor: Float = 0.01
 
     var paused: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _paused }
@@ -502,6 +517,12 @@ private final class MicWriter: @unchecked Sendable {
     var secondsSinceLastBuffer: TimeInterval {
         lock.lock(); defer { lock.unlock() }
         return Date().timeIntervalSince(_lastBufferAt)
+    }
+
+    /// How long the mic has been below the speech floor. Mirrors `SystemAudioTap.secondsSinceAudible`.
+    var secondsSinceAudible: TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        return Date().timeIntervalSince(_lastAudibleAt)
     }
 
     init(url: URL, inputFormat: AVAudioFormat) throws {
@@ -577,6 +598,8 @@ private final class MicWriter: @unchecked Sendable {
                 sum += channel[i] * channel[i]
             }
             let rms = count > 0 ? sqrtf(sum / Float(count)) : 0
+            // Real speech (not room tone) means someone's still talking — keep the call alive.
+            if rms >= Self.audibleFloor { _lastAudibleAt = Date() }   // still under `lock`
             // Map RMS to a rough 0…1 meter (-50 dB floor).
             let db = 20 * log10f(max(rms, 0.000_01))
             levelValue = max(0, min(1, (db + 50) / 50))

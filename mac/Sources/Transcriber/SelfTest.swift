@@ -862,6 +862,17 @@ enum SelfTest {
         silence = 200
         if await audio.poll() != .ended { failures.append("audio should read ended after sustained silence") }
 
+        // Regression: a call recorded through the mic (phone on speaker, in-person) keeps the
+        // system-audio channel silent the whole time. The silence fed to the detector must be
+        // min(mic, system), so mic speech alone keeps the meeting active and it only ends once
+        // BOTH channels have been quiet. Watching system audio alone ended live recordings.
+        var micSilence: TimeInterval = 5
+        let sysSilence: TimeInterval = 200   // nothing ever plays through the laptop
+        let bothChannels = AudioSilenceDetector(threshold: 150, silenceSeconds: { min(micSilence, sysSilence) })
+        if await bothChannels.poll() != .active { failures.append("mic speech must keep the meeting active despite system-audio silence") }
+        micSilence = 200   // the person finally stopped talking too
+        if await bothChannels.poll() != .ended { failures.append("both channels silent should read ended") }
+
         // Proactive suggestion dedup: suggest once per meeting, re-suggest after leave+rejoin,
         // stay quiet while recording or disabled.
         let meet = "meet:abc-defg-hij"
