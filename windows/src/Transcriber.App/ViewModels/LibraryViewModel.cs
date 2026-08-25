@@ -58,6 +58,7 @@ public sealed partial class LibraryViewModel : ObservableObject
     private bool _canCancelProcessing;
 
     private CancellationTokenSource? _importCancellation;
+    private TaskCompletionSource _processingCompletion = CompletedProcessingSource();
 
     public LibraryViewModel(LibraryStore store)
     {
@@ -183,6 +184,7 @@ public sealed partial class LibraryViewModel : ObservableObject
         int expectedSpeakers = -1)
     {
         IsBusy = true;
+        _processingCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         CanCancelProcessing = true;
         StatusMessage = $"Transcribing {Path.GetFileName(sourcePath)}…";
         ProcessingProgress = 1;
@@ -240,6 +242,7 @@ public sealed partial class LibraryViewModel : ObservableObject
             CanCancelProcessing = false;
             _importCancellation?.Dispose();
             _importCancellation = null;
+            _processingCompletion.TrySetResult();
         }
     }
 
@@ -250,6 +253,15 @@ public sealed partial class LibraryViewModel : ObservableObject
         StatusMessage = "Cancelling transcription…";
         CanCancelProcessing = false;
         _importCancellation.Cancel();
+    }
+
+    public Task WaitForProcessingAsync() => _processingCompletion.Task;
+
+    private static TaskCompletionSource CompletedProcessingSource()
+    {
+        var source = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        source.SetResult();
+        return source;
     }
 
     private void ApplyPipelineProgress(PipelineProgress update)

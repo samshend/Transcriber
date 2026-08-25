@@ -72,6 +72,14 @@ public static class ProcessRunner
         catch (OperationCanceledException)
         {
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { /* already gone */ }
+            try
+            {
+                if (!process.HasExited)
+                    await process.WaitForExitAsync(CancellationToken.None)
+                        .WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None)
+                        .ConfigureAwait(false);
+            }
+            catch { /* shutdown remains best-effort after the tree termination request */ }
             throw;
         }
 

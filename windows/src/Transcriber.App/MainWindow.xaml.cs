@@ -19,6 +19,8 @@ public sealed partial class MainWindow : Window
     private readonly MediaPlayer _audioMediaPlayer = new() { AutoPlay = false, Volume = 1.0 };
     private RecordingSession? _recording;
     private int _detailVersion;
+    private bool _allowClose;
+    private bool _closeCancellationInProgress;
 
     private const string VadFile = "ggml-silero-v5.1.2.bin";
 
@@ -38,21 +40,33 @@ public sealed partial class MainWindow : Window
         _audioMediaPlayer.MediaFailed += AudioMediaPlayer_MediaFailed;
         Closed += (_, _) => _audioMediaPlayer.Dispose();
         _recordingTimer.Tick += (_, _) => RefreshRecordingUi();
-        AppWindow.Closing += (_, args) =>
-        {
-            if (_recording?.State is RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing)
-            {
-                args.Cancel = true;
-                Vm.StatusMessage = "Stop or discard the recording before closing Transcriber.";
-                RecordingWarningText.Text = Vm.StatusMessage;
-            }
-            else if (Vm.IsBusy)
-            {
-                Vm.CancelProcessing();
-            }
-        };
+        AppWindow.Closing += AppWindow_Closing;
         NavList.SelectedIndex = 0;   // "All"
         UpdateDetail(null);
+    }
+
+    private async void AppWindow_Closing(
+        Microsoft.UI.Windowing.AppWindow sender,
+        Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
+    {
+        if (_allowClose) return;
+        if (_recording?.State is RecordingState.Recording or RecordingState.Paused or RecordingState.Finalizing)
+        {
+            args.Cancel = true;
+            Vm.StatusMessage = "Stop or discard the recording before closing Transcriber.";
+            RecordingWarningText.Text = Vm.StatusMessage;
+            return;
+        }
+        if (!Vm.IsBusy) return;
+
+        args.Cancel = true;
+        if (_closeCancellationInProgress) return;
+        _closeCancellationInProgress = true;
+        Vm.CancelProcessing();
+        Vm.StatusMessage = "Stopping transcription before closing…";
+        await Vm.WaitForProcessingAsync();
+        _allowClose = true;
+        Close();
     }
 
     // MARK: - Sidebar selection & drop
