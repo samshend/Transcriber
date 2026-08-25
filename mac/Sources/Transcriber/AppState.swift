@@ -23,6 +23,9 @@ final class AppState: ObservableObject {
         didSet { scheduleHistorySave() }
     }
     @Published var isProcessing = false
+    /// Jobs the user asked to stop but whose external process hasn't wound down yet.
+    /// Drives the transient "Stopping…" state in the queue row.
+    @Published private(set) var stoppingJobIDs: Set<UUID> = []
 
     @Published var modelID: String { didSet { defaults.set(modelID, forKey: "modelID") } }
     @Published var language: String { didSet { defaults.set(language, forKey: "language") } }
@@ -86,6 +89,8 @@ final class AppState: ObservableObject {
     private static let meetingGrace: TimeInterval = 600   // 10 minutes before auto-stopping
     private var currentProcess: Process?
     private var stopRequested = false
+    /// IDs the user stopped individually (vs. `stopRequested`, which halts the whole queue).
+    private var cancelledJobIDs: Set<UUID> = []
     private var isWorking = false
     private var historySaveTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
@@ -717,7 +722,30 @@ final class AppState: ObservableObject {
 
     func stopAll() {
         stopRequested = true
+        for job in jobs where job.status.isRunning { stoppingJobIDs.insert(job.id) }
         currentProcess?.terminate()
+    }
+
+    /// Stop a single job. A queued job is simply dropped; the running job's external
+    /// process is terminated (a graceful SIGTERM whisper-cli/ffmpeg handle by exiting)
+    /// and the queue moves on to the next file instead of halting entirely.
+    func cancel(_ job: TranscriptionJob) {
+        switch job.status {
+        case .queued:
+            jobs.removeAll { $0.id == job.id }
+        case .converting, .transcribing, .diarizing:
+            guard !cancelledJobIDs.contains(job.id) else { return }
+            cancelledJobIDs.insert(job.id)
+            stoppingJobIDs.insert(job.id)
+            currentProcess?.terminate()
+        default:
+            break
+        }
+    }
+
+    /// True when either the whole queue was stopped or this job was cancelled on its own.
+    private func isCancelRequested(_ id: UUID) -> Bool {
+        stopRequested || cancelledJobIDs.contains(id)
     }
 
     private func updateJob(_ id: UUID, _ mutate: (inout TranscriptionJob) -> Void) {
@@ -738,6 +766,9 @@ final class AppState: ObservableObject {
                     $0.finishedAt = Date()
                 }
             }
+            cancelledJobIDs.remove(id)
+            stoppingJobIDs.remove(id)
+            currentProcess = nil
         }
 
         guard job.sourceExists else {
@@ -784,7 +815,7 @@ final class AppState: ObservableObject {
             }
             defer { try? FileManager.default.removeItem(at: wav) }
 
-            if stopRequested {
+            if isCancelRequested(id) {
                 updateJob(id) { $0.status = .cancelled }
                 return
             }
@@ -808,7 +839,7 @@ final class AppState: ObservableObject {
                 // each speaker turn gets its own language detection (EN → RU switches).
                 updateJob(id) { $0.status = .diarizing }
                 let speakers = try await Diarizer.shared.diarize(wavURL: wav)
-                if stopRequested {
+                if isCancelRequested(id) {
                     updateJob(id) { $0.status = .cancelled }
                     return
                 }
@@ -821,10 +852,10 @@ final class AppState: ObservableObject {
                     ffmpeg: ffmpeg,
                     serverBinary: serverBinary,
                     allowedLanguages: allowed,
-                    isCancelled: { [weak self] in self?.stopRequested ?? true },
+                    isCancelled: { [weak self] in self?.isCancelRequested(id) ?? true },
                     onProgress: onProgress
                 )
-                if stopRequested {
+                if isCancelRequested(id) {
                     updateJob(id) { $0.status = .cancelled }
                     return
                 }
@@ -854,7 +885,7 @@ final class AppState: ObservableObject {
                 if transcription.segments.isEmpty {
                     throw CommandFailure(tool: "whisper-cli", status: 0, stderrTail: "No speech detected in the file.")
                 }
-                if stopRequested {
+                if isCancelRequested(id) {
                     updateJob(id) { $0.status = .cancelled }
                     return
                 }
@@ -931,10 +962,9 @@ final class AppState: ObservableObject {
                 }
             }
         } catch {
-            let cancelled = stopRequested
+            let cancelled = isCancelRequested(id)
             updateJob(id) { $0.status = cancelled ? .cancelled : .failed(message: error.localizedDescription) }
         }
-        currentProcess = nil
     }
 
     /// `Recording X.m4a` → its `Recording X.mic.m4a` / `Recording X.system.m4a` siblings.

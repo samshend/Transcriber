@@ -144,7 +144,7 @@ struct ContentView: View {
                 } label: {
                     Label("Stop", systemImage: "stop.fill")
                 }
-                .help("Stop after terminating the current file")
+                .help("Stop everything and clear the queue")
             } else if app.hasQueuedJobs {
                 Button {
                     app.start()

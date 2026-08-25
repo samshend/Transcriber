@@ -22,6 +22,27 @@ enum JobStatus: Equatable {
         default: return false
         }
     }
+
+    /// Determinate progress 0…1 for the unified bar, or nil when the stage has no
+    /// measurable progress (audio conversion, speaker detection) and the bar should
+    /// animate indeterminately. Only whisper-cli reports a real fraction.
+    var fraction: Double? {
+        if case .transcribing(let progress) = self { return progress }
+        return nil
+    }
+
+    /// Human-readable stage label shown under the progress bar.
+    var caption: String {
+        switch self {
+        case .queued: return "Queued"
+        case .converting: return "Preparing audio…"
+        case .transcribing: return "Transcribing…"
+        case .diarizing: return "Detecting speakers…"
+        case .done: return "Done"
+        case .failed(let message): return message
+        case .cancelled: return "Stopped"
+        }
+    }
 }
 
 struct TranscriptionJob: Identifiable, Equatable {

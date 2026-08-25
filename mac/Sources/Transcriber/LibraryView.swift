@@ -485,47 +485,104 @@ private struct ProcessingRow: View {
     @EnvironmentObject private var app: AppState
     let job: TranscriptionJob
 
+    private var isStopping: Bool { app.stoppingJobIDs.contains(job.id) }
+
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: job.isVideo ? "film" : "waveform").foregroundStyle(.secondary).frame(width: 20)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(job.sourceURL.lastPathComponent).lineLimit(1).truncationMode(.middle)
-                status
+                if job.status.isRunning {
+                    progress
+                } else {
+                    status
+                }
             }
             Spacer()
-            if !job.status.isRunning {
-                Button { app.remove(job) } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.borderless)
-            }
+            trailingControl
         }
         .padding(.vertical, 3)
     }
+
+    // MARK: Running — unified bar + stage rail
+
+    @ViewBuilder
+    private var progress: some View {
+        // Determinate while whisper reports a percentage; indeterminate for audio
+        // conversion and speaker detection, which have no measurable progress.
+        if let fraction = job.status.fraction {
+            ProgressView(value: fraction)
+        } else {
+            ProgressView().progressViewStyle(.linear)
+        }
+        HStack(spacing: 8) {
+            Text(isStopping ? "Stopping…" : job.status.caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            stageRail
+            Spacer(minLength: 0)
+            if let fraction = job.status.fraction {
+                Text("\(Int(fraction * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// The pipeline steps, with the active one highlighted. Only the current stage is
+    /// emphasized (not "everything up to here"), so it reads correctly whether speakers
+    /// are detected before transcription (multilingual path) or after it.
+    private var stageRail: some View {
+        HStack(spacing: 6) {
+            ForEach(stageLabels, id: \.self) { label in
+                Text(label)
+                    .font(.caption2)
+                    .fontWeight(label == currentStageLabel ? .semibold : .regular)
+                    .foregroundStyle(label == currentStageLabel ? Color.accentColor : Color.secondary)
+            }
+        }
+    }
+
+    private var stageLabels: [String] {
+        job.diarize ? ["Prepare", "Transcribe", "Speakers"] : ["Prepare", "Transcribe"]
+    }
+
+    private var currentStageLabel: String? {
+        switch job.status {
+        case .converting: return "Prepare"
+        case .transcribing: return "Transcribe"
+        case .diarizing: return "Speakers"
+        default: return nil
+        }
+    }
+
+    // MARK: Not running — plain status text
 
     @ViewBuilder
     private var status: some View {
         switch job.status {
         case .queued: Text("Queued").font(.caption).foregroundStyle(.secondary)
-        case .converting: Text("Extracting audio…").font(.caption).foregroundStyle(.blue)
-        case .transcribing(let progress):
-            HStack(spacing: 8) {
-                if let progress {
-                    ProgressView(value: progress).frame(width: 120)
-                    Text("\(Int(progress * 100))%").font(.caption).foregroundStyle(.secondary)
-                } else {
-                    ProgressView().controlSize(.small)
-                    Text("Transcribing…").font(.caption).foregroundStyle(.blue)
-                }
-            }
-        case .diarizing:
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("Detecting speakers…").font(.caption).foregroundStyle(.blue)
-            }
         case .failed(let message): Text(message).font(.caption).foregroundStyle(.red).lineLimit(2)
         case .cancelled: Text("Stopped").font(.caption).foregroundStyle(.secondary)
-        case .done: EmptyView()
+        default: EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var trailingControl: some View {
+        if job.status.isRunning {
+            Button { app.cancel(job) } label: {
+                Image(systemName: "stop.circle.fill")
+                    .foregroundStyle(isStopping ? .tertiary : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .disabled(isStopping)
+            .help("Stop this transcription")
+        } else {
+            Button { app.remove(job) } label: {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.borderless)
         }
     }
 }
