@@ -27,9 +27,11 @@ investment — not local summarisation.
 | Format parity with the macOS app | **verified** — output parses correctly through the Mac MCP server |
 | `Transcriber.App` — WinUI 3 GUI (3-column: projects / list / detail + audio player + drag-drop) | **builds cleanly on Windows**; launch/UI testing in progress |
 | Recording — WASAPI mic + loopback | **first vertical slice implemented and hardware-tested**; reliability hardening remains |
-| Diarization (speaker labels) | deferred; see "Known gaps" |
+| Diarization (speaker labels) | **first slice implemented:** sherpa-onnx + pyannote/3D-Speaker, native C# |
+| Transcription quality | **implemented:** persisted Faster / Balanced / More accurate model slider |
 
-**42 xUnit tests green on macOS** (`dotnet test`), covering merging, whisper flags/JSON, and the
+**51 xUnit tests green** (`dotnet test`), covering merging, speaker attribution/renaming,
+whisper flags/JSON, and the
 full library lifecycle. The library layer is byte-compatible with the macOS app's `library.json`
 model and transcript format (FORMAT contract), so the two products read each other's data.
 
@@ -133,11 +135,14 @@ dotnet run --project src/Transcriber.Cli -- ~/some-call.m4a --language ru \
 
 ## Known gaps
 
-- **No speaker labels yet.** Diarization would come from sherpa-onnx (pyannote-segmentation-3.0
-  + WeSpeaker on ONNX Runtime, CPU-only). Deferred because it adds ~100 MB and the pyannote
-  model licences need checking for commercial redistribution. Worth knowing: measured against
-  energy-derived ground truth on a real 44-minute two-party call, the macOS diarizer was
-  **98% accurate (179/183 blocks)**, so this is less urgent than assumed.
+Hardware-specific CPU/CUDA measurements and repeatable benchmark rules are documented in
+[PERFORMANCE.md](PERFORMANCE.md).
+
+- **Diarization needs multi-speaker tuning.** The native sherpa-onnx pipeline, pyannote
+  segmentation, 3D-Speaker embeddings, timed attribution, Markdown labels, speaker counts, and
+  rename UI are implemented. A one-speaker hardware clip passes end to end. Real two-/four-person
+  calls are still needed to tune clustering and phantom-speaker cleanup. The sherpa-onnx code is
+  Apache-2.0; model-weight redistribution licensing must be confirmed before commercial bundling.
 - **No Vulkan whisper build.** whisper.cpp ships no prebuilt Vulkan binary for Windows, and
   Vulkan is the entire integrated-GPU story for GPU-less laptops (upstream claims ~12× over CPU
   on Intel/AMD iGPUs). Compiling it with `-DGGML_VULKAN=ON` is a real build step, not a download.

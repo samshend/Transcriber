@@ -50,9 +50,9 @@ Verified on this Windows 11 machine:
 | File import | Files and folders, recursive scanning, drag/drop | Single-file picker only | P1 |
 | Processing queue | Multiple jobs, explicit start/stop, per-stage rows, cancellation | One import processed immediately; global busy state | P1 |
 | Local transcription | Whisper, auto language, VAD, timestamps, vocabulary | Engine supports language/VAD/vocabulary; UI hard-codes auto language and no vocabulary | P1 settings/UI |
-| Speaker diarization | FluidAudio/CoreML speaker labels | Missing; format can represent speakers | P1 for readable multi-party meetings |
+| Speaker diarization | FluidAudio/CoreML speaker labels | **First slice:** native sherpa-onnx, pyannote segmentation + 3D-Speaker embeddings | P1 multi-speaker tuning/model licensing |
 | Mixed-language mode | Per-turn detection and cleanup | Missing | P2 unless pilot calls require code-switching |
-| Rename speakers | Edit Speaker 1/2 labels | Missing because diarization is missing | P1 with diarization |
+| Rename speakers | Edit Speaker 1/2 labels | **Implemented:** context-menu form rewrites body/frontmatter and refreshes library | Validate UX on multi-speaker transcript |
 | Projects/library | Create/edit/delete projects with notes; move items | Core supports all; UI creates projects and drag-moves items, but has no edit/delete/notes UI | P1 |
 | Transcript detail | Metadata, warnings, rich readable transcript, audio controls | Metadata, durable warning, plain Markdown text, and native player with volume/time/seek progress | P1 transcript-rendering polish |
 | Export | Transcript/audio to Downloads or chosen location | Implemented for transcript; audio has Downloads action but no Save As action | Small P1 gap |
@@ -61,8 +61,8 @@ Verified on this Windows 11 machine:
 | Search | Transcript indexing/search architecture | No Windows search UI/index | P2 |
 | Ask Claude/ChatGPT | Per-transcript handoff | Missing | P3; Copilot handoff matters more on Windows |
 | MCP server | List/search/read/queue transcripts | Missing | P3 |
-| Model management | Select/download models in app | Assets must be prepared at build time | P1 for distributable build |
-| Settings | Models, language, VAD, vocabulary, speakers, recording, summaries, integrations | No Settings UI | P1, starting with recording/transcription |
+| Model management | Select/download models in app | Three installed models are selectable; download still happens during asset setup | P1 in-app download/recovery |
+| Settings | Models, language, VAD, vocabulary, speakers, recording, summaries, integrations | First settings slice: persisted Faster/Balanced/More accurate model slider | P1 remaining settings |
 | Background presence | Menu-bar controls and background monitoring | Missing | P2; Windows equivalent is tray icon |
 | Distribution | Bundled local tools in app build | Debug unpackaged build only; assets bundled into output | P1 after pilot usability |
 
