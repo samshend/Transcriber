@@ -1,0 +1,19 @@
+THIRD-PARTY COMPONENTS — FRIEND TEST BUILD
+==========================================
+
+This evaluation installer includes third-party software and downloads model files selected during
+setup. Relevant upstream projects and their accompanying license/notices should be consulted
+before any public or commercial redistribution.
+
+* whisper.cpp — https://github.com/ggml-org/whisper.cpp
+* Whisper model weights — https://huggingface.co/ggerganov/whisper.cpp
+* FFmpeg (LGPL build) — https://ffmpeg.org/ and https://github.com/BtbN/FFmpeg-Builds
+* sherpa-onnx — https://github.com/k2-fsa/sherpa-onnx
+* pyannote speaker segmentation model — distributed via sherpa-onnx model releases
+* 3D-Speaker embedding model — distributed via sherpa-onnx model releases
+* NAudio — https://github.com/naudio/NAudio
+* Windows App SDK — https://github.com/microsoft/WindowsAppSDK
+* .NET — https://github.com/dotnet/runtime
+
+This package is for private evaluation. Model-weight licensing and complete attribution must be
+reviewed before broader distribution.

@@ -60,6 +60,19 @@ dotnet build src\Transcriber.App\Transcriber.App.csproj -r win-x64
 # then bundle ffmpeg + whisper into the output's bin\ / models\ (see scripts\fetch-assets.ps1)
 ```
 
+### Build the friend-test installer
+
+After fetching the native tools, build the self-contained x64 publish and installer with:
+
+```powershell
+.\scripts\build-friend-installer.ps1
+```
+
+The setup executable is written to `artifacts\friend-test`. AI models are deliberately excluded
+from the executable: setup asks for a transcription quality, downloads only that model plus the
+required VAD/diarization models, and verifies every download with SHA-256. Use `-SkipPublish` to
+recompile only the installer after editing its script or handoff notes.
+
 ### ⚠️ Expect a compile-fix pass on the first Windows build
 
 This code was written without a compiler. Likely first-build fixes, in rough order of probability:
