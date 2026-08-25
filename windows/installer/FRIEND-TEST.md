@@ -15,11 +15,14 @@ GETTING STARTED
 ---------------
 1. Open Transcriber from the Start menu.
 2. To transcribe an existing recording, select Import and choose the audio/video file.
+   You can also drag one audio/video file from File Explorer and drop it anywhere in the app.
 3. Select the known number of speakers when possible. Automatic speaker counting is experimental.
 4. To record a conversation, select Record. Confirm that the microphone level moves before relying
    on the recording. Stop & transcribe saves and processes the recording.
 5. The Stop transcription button cancels an active job. Closing the app during processing also
    cancels and waits for the worker to stop.
+6. You can change transcription quality in Settings. If that model is not installed, the app
+   downloads and verifies it automatically before switching.
 
 IMPORTANT LIMITATIONS
 ---------------------

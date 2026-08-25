@@ -117,6 +117,7 @@ public sealed partial class MainWindow : Window
         var detailVersion = ++_detailVersion;
         var hasSelection = vm is not null;
         EmptyDetail.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
+        DetailActions.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
         DetailTitle.Visibility = DetailMeta.Visibility = DetailBody.Visibility =
             hasSelection ? Visibility.Visible : Visibility.Collapsed;
 
@@ -287,20 +288,82 @@ public sealed partial class MainWindow : Window
             title.Text = option.Title;
             description.Text = option.Description;
             var installed = File.Exists(modelPath);
-            availability.Text = installed ? "Model installed and ready." : "Model is not installed. Run the Windows asset setup first.";
+            availability.Text = installed ? "Model installed and ready." : "Model will be downloaded when you save.";
             availability.Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(
                 installed ? Microsoft.UI.Colors.Green : Microsoft.UI.Colors.OrangeRed);
-            dialog.IsPrimaryButtonEnabled = installed;
+            dialog.PrimaryButtonText = installed ? "Save" : "Download & save";
         }
         slider.ValueChanged += (_, _) => RefreshChoice();
         RefreshChoice();
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
 
-        _settings.Quality = (TranscriptionQuality)(int)Math.Round(slider.Value);
+        var quality = (TranscriptionQuality)(int)Math.Round(slider.Value);
+        var selected = TranscriptionModels.Get(quality);
+        var modelPath = Path.Combine(AppContext.BaseDirectory, "models", selected.FileName);
+        if (!File.Exists(modelPath) && !await DownloadModelAsync(selected, modelPath)) return;
+
+        _settings.Quality = quality;
         _settings.Save();
-        var selected = TranscriptionModels.Get(_settings.Quality);
         _tools = ToolPaths.FromAppDirectory(AppContext.BaseDirectory, selected.FileName, VadFile);
         Vm.StatusMessage = $"Transcription quality: {selected.Title}.";
+    }
+
+    private async Task<bool> DownloadModelAsync(TranscriptionModelOption model, string destination)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var progressBar = new ProgressBar { Minimum = 0, Maximum = 100, Width = 420 };
+        var progressText = new TextBlock
+        {
+            Text = $"Downloading {model.Title} model…",
+            TextWrapping = TextWrapping.Wrap,
+        };
+        var content = new StackPanel { Spacing = 10 };
+        content.Children.Add(progressText);
+        content.Children.Add(progressBar);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Downloading transcription model",
+            Content = content,
+            CloseButtonText = "Cancel",
+        };
+        dialog.CloseButtonClick += (_, _) => cancellation.Cancel();
+        var dialogOperation = dialog.ShowAsync();
+        var progress = new Progress<double>(value =>
+        {
+            progressBar.Value = value;
+            progressText.Text = $"Downloading {model.Title} model… {value:0}%";
+        });
+
+        try
+        {
+            await ModelDownloader.DownloadAsync(model, destination, progress, cancellation.Token);
+            dialog.Hide();
+            await dialogOperation;
+            Vm.StatusMessage = $"{model.Title} model downloaded and verified.";
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            dialog.Hide();
+            await dialogOperation;
+            Vm.StatusMessage = "Model download cancelled.";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            dialog.Hide();
+            await dialogOperation;
+            var error = new ContentDialog
+            {
+                XamlRoot = Content.XamlRoot,
+                Title = "Model download failed",
+                Content = ex.Message,
+                CloseButtonText = "OK",
+            };
+            await error.ShowAsync();
+            return false;
+        }
     }
 
     private void StartRecording_Click(object sender, RoutedEventArgs e)
@@ -452,11 +515,43 @@ public sealed partial class MainWindow : Window
         InitializeWithWindow(picker);
         var file = await picker.PickSingleFileAsync();
         if (file is null) return;
+        await ImportFileAsync(file.Path);
+    }
+
+    private void Window_DragOver(object sender, DragEventArgs e)
+    {
+        if (!Vm.IsBusy && e.DataView.Contains(StandardDataFormats.StorageItems))
+        {
+            e.AcceptedOperation = DataPackageOperation.Copy;
+            e.DragUIOverride.Caption = "Transcribe this recording";
+        }
+    }
+
+    private async void Window_Drop(object sender, DragEventArgs e)
+    {
+        if (Vm.IsBusy || !e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+        var files = (await e.DataView.GetStorageItemsAsync()).OfType<StorageFile>().ToList();
+        if (files.Count != 1 || !IsSupportedMedia(files[0].Path))
+        {
+            Vm.StatusMessage = "Drop one supported audio or video file at a time.";
+            return;
+        }
+        await ImportFileAsync(files[0].Path);
+    }
+
+    private async Task ImportFileAsync(string path)
+    {
+        if (Vm.IsBusy || !IsSupportedMedia(path)) return;
         var expectedSpeakers = await PromptForSpeakerCountAsync();
         if (expectedSpeakers is null) return;
-        await Vm.ImportAsync(file.Path, _tools, language: "auto", vocabulary: null,
+        await Vm.ImportAsync(path, _tools, language: "auto", vocabulary: null,
             expectedSpeakers: expectedSpeakers.Value);
     }
+
+    private static bool IsSupportedMedia(string path) => new[]
+    {
+        ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".flac", ".mp4", ".mov", ".mkv", ".webm",
+    }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 
     private void CancelProcessing_Click(object sender, RoutedEventArgs e)
     {
@@ -471,8 +566,38 @@ public sealed partial class MainWindow : Window
 
     // MARK: - Item context actions
 
-    private static TranscriptItemViewModel? ItemOf(object sender) =>
-        (sender as FrameworkElement)?.DataContext as TranscriptItemViewModel;
+    private TranscriptItemViewModel? ItemOf(object sender) =>
+        (sender as FrameworkElement)?.DataContext as TranscriptItemViewModel ?? Vm.SelectedItem;
+
+    private void RevealInExplorer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is not { } vm) return;
+        var path = Vm.Store.TranscriptPath(vm.Item);
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "explorer.exe",
+            Arguments = $"/select,\"{path}\"",
+            UseShellExecute = true,
+        });
+    }
+
+    private async void CopyTranscript_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is not { } vm) return;
+        try
+        {
+            var content = await File.ReadAllTextAsync(Vm.Store.TranscriptPath(vm.Item));
+            var package = new DataPackage();
+            package.SetText(StripFrontmatter(content));
+            Clipboard.SetContent(package);
+            Clipboard.Flush();
+            Vm.StatusMessage = "Transcript copied.";
+        }
+        catch (Exception ex)
+        {
+            Vm.StatusMessage = $"Could not copy transcript: {ex.Message}";
+        }
+    }
 
     private async void Open_Click(object sender, RoutedEventArgs e)
     {

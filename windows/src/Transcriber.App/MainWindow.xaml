@@ -7,7 +7,8 @@
     xmlns:mux="using:Microsoft.UI.Xaml.Controls"
     Title="Transcriber">
 
-    <Grid ColumnSpacing="0" DataContext="{x:Bind Vm}">
+    <Grid ColumnSpacing="0" DataContext="{x:Bind Vm}" AllowDrop="True"
+          DragOver="Window_DragOver" Drop="Window_Drop">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -211,6 +212,44 @@
                            IsTextSelectionEnabled="True" TextWrapping="Wrap" />
                 <TextBlock x:Name="DetailMeta" Style="{ThemeResource CaptionTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <StackPanel x:Name="DetailActions" Orientation="Horizontal" Spacing="8" Visibility="Collapsed">
+                    <Button Click="RevealInExplorer_Click" ToolTipService.ToolTip="Show transcript in File Explorer">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE838;" FontSize="14" />
+                            <TextBlock Text="Explorer" />
+                        </StackPanel>
+                    </Button>
+                    <Button Click="CopyTranscript_Click" ToolTipService.ToolTip="Copy transcript text">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE8C8;" FontSize="14" />
+                            <TextBlock Text="Copy Transcript" />
+                        </StackPanel>
+                    </Button>
+                    <Button ToolTipService.ToolTip="More transcript actions">
+                        <Button.Content>
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE712;" FontSize="14" />
+                                <TextBlock Text="More" />
+                            </StackPanel>
+                        </Button.Content>
+                        <Button.Flyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="Open Transcript" Click="Open_Click" />
+                                <MenuFlyoutSubItem Text="Export">
+                                    <MenuFlyoutItem Text="Save Transcript to Downloads" Click="ExportTranscriptDownloads_Click" />
+                                    <MenuFlyoutItem Text="Save Transcript As…" Click="ExportTranscriptAs_Click" />
+                                    <MenuFlyoutItem Text="Save Audio to Downloads" Click="ExportAudioDownloads_Click"
+                                                    Visibility="{Binding SelectedItem.HasAudio, Converter={StaticResource BoolToVis}}" />
+                                </MenuFlyoutSubItem>
+                                <MenuFlyoutItem Text="Rename…" Click="Rename_Click" />
+                                <MenuFlyoutItem Text="Rename Speakers…" Click="RenameSpeakers_Click"
+                                                Visibility="{Binding SelectedItem.HasSpeakers, Converter={StaticResource BoolToVis}}" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="Delete Permanently" Click="Delete_Click" />
+                            </MenuFlyout>
+                        </Button.Flyout>
+                    </Button>
+                </StackPanel>
                 <InfoBar x:Name="DetailWarning" Severity="Warning" IsOpen="False" IsClosable="False" />
 
                 <MediaPlayerElement x:Name="AudioPlayer"
