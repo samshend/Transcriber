@@ -194,6 +194,27 @@ public sealed class LibraryStore
         Save();
     }
 
+    public void RenameSpeakers(Guid id, IReadOnlyDictionary<string, string> replacements)
+    {
+        var item = _index.Items.FirstOrDefault(i => i.Id == id);
+        if (item is null) return;
+        var path = TranscriptPath(item);
+        var content = File.ReadAllText(path);
+        foreach (var (original, requestedName) in replacements)
+        {
+            var name = requestedName.Trim();
+            if (name.Length == 0 || name == original || name.Contains('\n') || name.Contains('\r')) continue;
+            content = content.Replace($"**{original}**\r\n", $"**{name}**\r\n", StringComparison.Ordinal)
+                .Replace($"**{original}**\n", $"**{name}**\n", StringComparison.Ordinal)
+                .Replace($"\"{original}\"", $"\"{name.Replace("\"", "\\\"")}\"", StringComparison.Ordinal);
+        }
+        File.WriteAllText(path, content, new System.Text.UTF8Encoding(false));
+        ApplyMetadata(item, path);
+        item.Speakers = item.Speakers.Distinct().ToList();
+        item.Modified = DateTimeOffset.UtcNow;
+        Save();
+    }
+
     /// <summary>
     /// Permanently removes the library's copy (transcript + audio). Never touches anything the
     /// user has elsewhere on disk.

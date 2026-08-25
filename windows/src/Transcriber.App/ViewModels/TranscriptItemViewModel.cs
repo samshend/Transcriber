@@ -36,6 +36,7 @@ public sealed partial class TranscriptItemViewModel : ObservableObject
     public bool HasWarning => !string.IsNullOrEmpty(Item.RecordingWarning);
     public string? Warning => Item.RecordingWarning;
     public bool HasAudio => Item.AudioFile is not null;
+    public bool HasSpeakers => Item.Speakers.Count > 0;
 
     [ObservableProperty]
     private string? _projectName;

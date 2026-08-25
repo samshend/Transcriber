@@ -45,6 +45,20 @@ public sealed partial class LibraryViewModel : ObservableObject
     [ObservableProperty]
     private string? _statusMessage;
 
+    [ObservableProperty]
+    private string? _lastLogPath;
+
+    [ObservableProperty]
+    private double _processingProgress;
+
+    [ObservableProperty]
+    private string _processingDetail = string.Empty;
+
+    [ObservableProperty]
+    private bool _canCancelProcessing;
+
+    private CancellationTokenSource? _importCancellation;
+
     public LibraryViewModel(LibraryStore store)
     {
         Store = store;
@@ -130,6 +144,11 @@ public sealed partial class LibraryViewModel : ObservableObject
     }
 
     public void RenameItem(Guid itemId, string title) { Store.SetTitle(itemId, title); ReloadItems(); }
+    public void RenameSpeakers(Guid itemId, IReadOnlyDictionary<string, string> replacements)
+    {
+        Store.RenameSpeakers(itemId, replacements);
+        ReloadItems();
+    }
 
     public void DeleteItem(Guid itemId)
     {
@@ -160,10 +179,22 @@ public sealed partial class LibraryViewModel : ObservableObject
         string language,
         string? vocabulary,
         string? recordingWarning = null,
-        IReadOnlyList<string>? tracks = null)
+        IReadOnlyList<string>? tracks = null,
+        int expectedSpeakers = -1)
     {
         IsBusy = true;
+        CanCancelProcessing = true;
         StatusMessage = $"Transcribing {Path.GetFileName(sourcePath)}…";
+        ProcessingProgress = 1;
+        ProcessingDetail = "Step 1 of 4 · Inspecting recording…";
+        _importCancellation = new CancellationTokenSource();
+        var cancellationToken = _importCancellation.Token;
+        var logDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Transcriber", "Logs");
+        Directory.CreateDirectory(logDirectory);
+        LastLogPath = Path.Combine(logDirectory,
+            $"{DateTime.Now:yyyyMMdd-HHmmss}-{LibraryStore.Sanitize(Path.GetFileNameWithoutExtension(sourcePath))}.log");
         try
         {
             var projectId = Selection.Kind == LibrarySelectionKind.Project ? Selection.ProjectId : null;
@@ -172,6 +203,7 @@ public sealed partial class LibraryViewModel : ObservableObject
             try
             {
                 var pipeline = new TranscriptionPipeline(tools);
+                var progress = new Progress<PipelineProgress>(ApplyPipelineProgress);
                 var outcome = await Task.Run(() => pipeline.RunAsync(new TranscriptionRequest
                 {
                     SourcePath = sourcePath,
@@ -179,25 +211,76 @@ public sealed partial class LibraryViewModel : ObservableObject
                     Vocabulary = vocabulary,
                     RecordingWarning = recordingWarning,
                     Tracks = tracks ?? [],
+                    ExpectedSpeakers = expectedSpeakers,
                     OutputDirectory = workDir,
-                })).ConfigureAwait(true);
+                    LogPath = LastLogPath,
+                }, progress, cancellationToken)).ConfigureAwait(true);
 
                 Store.Ingest(outcome.MarkdownPath, audioPath: sourcePath, projectId: projectId);
                 ReloadItems();
                 StatusMessage = $"Added “{Path.GetFileNameWithoutExtension(sourcePath)}”.";
+                ProcessingProgress = 100;
             }
             finally
             {
                 try { Directory.Delete(workDir, recursive: true); } catch { }
             }
         }
+        catch (OperationCanceledException)
+        {
+            StatusMessage = "Transcription cancelled.";
+        }
         catch (Exception ex)
         {
-            StatusMessage = $"Transcription failed: {ex.Message}";
+            StatusMessage = $"Transcription failed: {ex.Message} (see Logs)";
         }
         finally
         {
             IsBusy = false;
+            CanCancelProcessing = false;
+            _importCancellation?.Dispose();
+            _importCancellation = null;
         }
     }
+
+    public void CancelProcessing()
+    {
+        if (_importCancellation is null || _importCancellation.IsCancellationRequested) return;
+        ProcessingDetail = "Cancelling transcription…";
+        StatusMessage = "Cancelling transcription…";
+        CanCancelProcessing = false;
+        _importCancellation.Cancel();
+    }
+
+    private void ApplyPipelineProgress(PipelineProgress update)
+    {
+        var message = update.Message ?? update.Stage.ToString();
+        switch (update.Stage)
+        {
+            case PipelineStage.Converting:
+                ProcessingProgress = 3;
+                ProcessingDetail = $"Step 1 of 4 · {message}";
+                break;
+            case PipelineStage.Transcribing:
+                ProcessingProgress = update.Fraction is { } transcription
+                    ? 8 + transcription * 72
+                    : 8;
+                ProcessingDetail = $"Step 2 of 4 · {message}";
+                break;
+            case PipelineStage.Diarizing:
+                ProcessingProgress = 80 + (update.Fraction ?? 0) * 17;
+                ProcessingDetail = $"Step 3 of 4 · {message}";
+                break;
+            case PipelineStage.Writing:
+                ProcessingProgress = 98;
+                ProcessingDetail = $"Step 4 of 4 · {message}";
+                break;
+            case PipelineStage.Done:
+                ProcessingProgress = 100;
+                ProcessingDetail = "Complete";
+                break;
+        }
+        StatusMessage = message;
+    }
+
 }

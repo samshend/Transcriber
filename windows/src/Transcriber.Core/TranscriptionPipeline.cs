@@ -7,6 +7,10 @@ public sealed class ToolPaths
     public required string WhisperCli { get; init; }
     public required string ModelPath { get; init; }
     public string? VadModelPath { get; init; }
+    public string? DiarizationSegmentationModelPath { get; init; }
+    public string? DiarizationEmbeddingModelPath { get; init; }
+    public bool DiarizationAvailable =>
+        File.Exists(DiarizationSegmentationModelPath) && File.Exists(DiarizationEmbeddingModelPath);
 
     /// <summary>Locates tools relative to the running app; also honours PATH-style overrides.</summary>
     public static ToolPaths FromAppDirectory(string appDirectory, string modelFileName, string vadFileName)
@@ -22,6 +26,8 @@ public sealed class ToolPaths
             WhisperCli = Path.Combine(bin, "whisper-cli" + executableSuffix),
             ModelPath = Path.Combine(models, modelFileName),
             VadModelPath = File.Exists(vad) ? vad : null,
+            DiarizationSegmentationModelPath = Path.Combine(models, "pyannote-segmentation-3.0.onnx"),
+            DiarizationEmbeddingModelPath = Path.Combine(models, "3dspeaker-eres2net-base-16k.onnx"),
         };
     }
 
@@ -40,6 +46,10 @@ public sealed record TranscriptionRequest
     public string? Vocabulary { get; init; }
     public string? RecordingWarning { get; init; }
     public IReadOnlyList<string> Tracks { get; init; } = [];
+    public bool Diarize { get; init; } = true;
+    /// <summary>-1 asks clustering to infer the count; a positive value forces that count.</summary>
+    public int ExpectedSpeakers { get; init; } = -1;
+    public string? LogPath { get; init; }
     /// <summary>Where the .md and .html go. Defaults to the source file's folder.</summary>
     public string? OutputDirectory { get; init; }
 }
@@ -63,6 +73,10 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
         IProgress<PipelineProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        using var log = new PipelineLog(request.LogPath);
+        log.Write($"START source={request.SourcePath}");
+        log.Write($"MODEL path={tools.ModelPath}");
+        log.Write($"OPTIONS language={request.Language} diarize={request.Diarize} threads={Environment.ProcessorCount}");
         tools.Validate();
         if (!File.Exists(request.SourcePath))
         {
@@ -74,8 +88,10 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
         try
         {
             var duration = await ProbeDurationAsync(request.SourcePath, cancellationToken).ConfigureAwait(false);
+            log.Write($"PROBE duration_seconds={duration?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"}");
 
-            progress?.Report(new PipelineProgress(PipelineStage.Converting, null));
+            progress?.Report(new PipelineProgress(PipelineStage.Converting, null, "Converting audio…"));
+            log.Write("STAGE converting");
             var wavPath = Path.Combine(workDirectory, "audio.wav");
             await ProcessRunner.RunOrThrowAsync(
                 tools.FFmpeg,
@@ -84,7 +100,9 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
                 "ffmpeg",
                 cancellationToken: cancellationToken).ConfigureAwait(false);
 
-            progress?.Report(new PipelineProgress(PipelineStage.Transcribing, 0));
+            progress?.Report(new PipelineProgress(
+                PipelineStage.Transcribing, null, "Loading model and analyzing speech regions…"));
+            log.Write("STAGE whisper_start");
             var outputBase = Path.Combine(workDirectory, "result");
             await ProcessRunner.RunOrThrowAsync(
                 tools.WhisperCli,
@@ -94,13 +112,16 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
                 "whisper-cli",
                 line =>
                 {
+                    log.Write("WHISPER " + line);
                     var fraction = WhisperCommand.ProgressFraction(line);
                     if (fraction is not null)
                     {
-                        progress?.Report(new PipelineProgress(PipelineStage.Transcribing, fraction));
+                        progress?.Report(new PipelineProgress(
+                            PipelineStage.Transcribing, fraction, $"Transcribing… {(int)(fraction * 100)}%"));
                     }
                 },
                 cancellationToken).ConfigureAwait(false);
+            log.Write("STAGE whisper_complete");
 
             var jsonPath = outputBase + ".json";
             if (!File.Exists(jsonPath))
@@ -115,8 +136,32 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
                 throw new ToolFailure("whisper-cli", 0, "no speech was detected in this file");
             }
 
-            progress?.Report(new PipelineProgress(PipelineStage.Writing, null));
-            var blocks = TranscriptMerger.Merge(recognised.Segments);
+            IReadOnlyList<SpeakerSegment> speakerSegments = [];
+            if (request.Diarize && tools.DiarizationAvailable)
+            {
+                progress?.Report(new PipelineProgress(PipelineStage.Diarizing, 0, "Detecting speakers… 0%"));
+                log.Write("STAGE diarization_start");
+                speakerSegments = await Task.Run(() => SpeakerDiarizer.Process(
+                    wavPath,
+                    tools.DiarizationSegmentationModelPath!,
+                    tools.DiarizationEmbeddingModelPath!,
+                    fraction =>
+                    {
+                        log.Write($"DIARIZATION progress={(int)(fraction * 100)}%");
+                        progress?.Report(new PipelineProgress(
+                            PipelineStage.Diarizing, fraction, $"Detecting speakers… {(int)(fraction * 100)}%"));
+                    },
+                    cancellationToken,
+                    numberOfSpeakers: request.ExpectedSpeakers), cancellationToken).ConfigureAwait(false);
+                log.Write($"STAGE diarization_complete segments={speakerSegments.Count}");
+            }
+
+            progress?.Report(new PipelineProgress(PipelineStage.Writing, null, "Writing transcript…"));
+            log.Write("STAGE writing");
+            var blocks = TranscriptMerger.Merge(
+                recognised.Segments,
+                speakerSegments.Count == 0 ? null : segment => SpeakerAttribution.Resolve(segment, speakerSegments));
+            var speakers = blocks.Select(block => block.Speaker).OfType<string>().Distinct().ToList();
 
             var source = new FileInfo(request.SourcePath);
             var meta = new TranscriptMetadata
@@ -124,10 +169,11 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
                 SourceFileName = source.Name,
                 SourcePath = source.FullName,
                 DurationSeconds = duration,
-                Model = "large-v3-turbo",
+                Model = Path.GetFileNameWithoutExtension(tools.ModelPath).Replace("ggml-", string.Empty),
                 Language = recognised.Language ?? request.Language,
                 RecordingWarning = request.RecordingWarning,
                 Tracks = request.Tracks,
+                Speakers = speakers,
             };
 
             var directory = request.OutputDirectory ?? source.DirectoryName!;
@@ -142,6 +188,7 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
                 .ConfigureAwait(false);
 
             progress?.Report(new PipelineProgress(PipelineStage.Done, 1));
+            log.Write($"DONE segments={recognised.Segments.Count} blocks={blocks.Count} speakers={speakers.Count}");
             return new TranscriptionOutcome(
                 markdownPath, htmlPath, recognised.Segments.Count, blocks.Count,
                 meta.Language, duration);
@@ -186,6 +233,26 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
         => File.WriteAllTextAsync(path, content, new System.Text.UTF8Encoding(false), cancellationToken);
 }
 
-public enum PipelineStage { Converting, Transcribing, Writing, Done }
+public enum PipelineStage { Converting, Transcribing, Diarizing, Writing, Done }
 
-public readonly record struct PipelineProgress(PipelineStage Stage, double? Fraction);
+public readonly record struct PipelineProgress(PipelineStage Stage, double? Fraction, string? Message = null);
+
+internal sealed class PipelineLog : IDisposable
+{
+    private readonly StreamWriter? _writer;
+    private readonly object _gate = new();
+
+    public PipelineLog(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        _writer = new StreamWriter(path, append: true, new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+    }
+
+    public void Write(string message)
+    {
+        lock (_gate) _writer?.WriteLine($"{DateTimeOffset.Now:O} {message}");
+    }
+
+    public void Dispose() => _writer?.Dispose();
+}

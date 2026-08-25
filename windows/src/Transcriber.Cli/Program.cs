@@ -25,6 +25,8 @@ var tools = new ToolPaths
     WhisperCli = Value("whisper") ?? defaults.WhisperCli,
     ModelPath = Value("model") ?? defaults.ModelPath,
     VadModelPath = Value("vad") ?? defaults.VadModelPath,
+    DiarizationSegmentationModelPath = Value("diarization-segmentation") ?? defaults.DiarizationSegmentationModelPath,
+    DiarizationEmbeddingModelPath = Value("diarization-embedding") ?? defaults.DiarizationEmbeddingModelPath,
 };
 
 try
@@ -42,6 +44,42 @@ if (tools.VadModelPath is null)
     Console.Error.WriteLine(
         "warning: no VAD model, so silence will not be skipped — expect invented sentences "
         + "in quiet stretches.");
+}
+
+if (arguments.ContainsKey("diarize-only"))
+{
+    if (!tools.DiarizationAvailable)
+    {
+        Console.Error.WriteLine("error: diarization models are missing");
+        return 3;
+    }
+    var threshold = float.TryParse(Value("threshold"),
+        System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture, out var parsedThreshold)
+        ? parsedThreshold : 0.9f;
+    var count = int.TryParse(Value("speakers"), out var parsedCount) ? parsedCount : -1;
+    var work = Path.Combine(Path.GetTempPath(), "transcriber-diarize-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(work);
+    try
+    {
+        var wav = Path.Combine(work, "audio.wav");
+        await ProcessRunner.RunOrThrowAsync(tools.FFmpeg,
+            ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", input,
+             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav], "ffmpeg");
+        var segments = SpeakerDiarizer.Process(wav,
+            tools.DiarizationSegmentationModelPath!, tools.DiarizationEmbeddingModelPath!,
+            fraction => Console.Write($"\rDetecting speakers… {(int)(fraction * 100),3}%"),
+            clusteringThreshold: threshold, numberOfSpeakers: count);
+        Console.WriteLine();
+        foreach (var group in segments.GroupBy(segment => segment.Speaker))
+            Console.WriteLine($"{group.Key}: {group.Sum(segment => segment.End - segment.Start):F1}s");
+        Console.WriteLine($"Detected {segments.Select(segment => segment.Speaker).Distinct().Count()} speakers in {segments.Count} turns (threshold {threshold:F2}).");
+        return 0;
+    }
+    finally
+    {
+        try { Directory.Delete(work, recursive: true); } catch { }
+    }
 }
 
 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -63,6 +101,9 @@ var progress = new Progress<PipelineProgress>(update =>
             break;
         case PipelineStage.Writing:
             Console.WriteLine("writing transcript…");
+            break;
+        case PipelineStage.Diarizing when update.Fraction is { } fraction:
+            Console.WriteLine($"detecting speakers… {(int)(fraction * 100)}%");
             break;
     }
 });

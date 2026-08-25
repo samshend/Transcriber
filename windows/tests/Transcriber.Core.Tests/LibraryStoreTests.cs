@@ -96,6 +96,24 @@ public sealed class LibraryStoreTests : IDisposable
     }
 
     [Fact]
+    public void RenameSpeakersUpdatesBodyFrontmatterAndIndex()
+    {
+        var (store, md, audio) = Setup();
+        var item = store.Ingest(md, audio);
+
+        store.RenameSpeakers(item.Id, new Dictionary<string, string>
+        {
+            ["Speaker 1"] = "Anastasia",
+            ["Speaker 2"] = "Client",
+        });
+
+        var content = File.ReadAllText(store.TranscriptPath(item));
+        Assert.Contains("**Anastasia**\n00:00", content.Replace("\r\n", "\n"));
+        Assert.Contains("speakers: [\"Anastasia\", \"Client\"]", content);
+        Assert.Equal(["Anastasia", "Client"], store.Items.Single().Speakers);
+    }
+
+    [Fact]
     public void ExportWritesACopyOutAndKeepsTheOriginalInLibrary()
     {
         var (store, md, audio) = Setup();

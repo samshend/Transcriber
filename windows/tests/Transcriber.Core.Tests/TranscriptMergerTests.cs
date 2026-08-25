@@ -8,6 +8,34 @@ namespace Transcriber.Core.Tests;
 /// </summary>
 public class TranscriptMergerTests
 {
+    [Fact]
+    public void SpeakerAttributionUsesGreatestOverlap()
+    {
+        var speakers = new[]
+        {
+            new SpeakerSegment("Speaker 1", 0, 5.5),
+            new SpeakerSegment("Speaker 2", 5.5, 12),
+        };
+
+        var speaker = SpeakerAttribution.Resolve(new TranscriptSegment(4, 9, "handover"), speakers);
+
+        Assert.Equal("Speaker 2", speaker);
+    }
+
+    [Fact]
+    public void SpeakerAttributionUsesNearestTurnWhenThereIsNoOverlap()
+    {
+        var speakers = new[]
+        {
+            new SpeakerSegment("Speaker 1", 0, 3),
+            new SpeakerSegment("Speaker 2", 8, 12),
+        };
+
+        var speaker = SpeakerAttribution.Resolve(new TranscriptSegment(6.5, 7, "near second"), speakers);
+
+        Assert.Equal("Speaker 2", speaker);
+    }
+
     private static TranscriptSegment Seg(double start, double end, string text) => new(start, end, text);
 
     [Fact]

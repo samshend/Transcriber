@@ -30,6 +30,9 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
     <PackageReference Include="NAudio" Version="3.0.1" />
+    <!-- Keep this direct reference: WinUI's self-contained publish does not copy the managed
+         sherpa assembly/native runtime when it is only a transitive dependency of Core. -->
+    <PackageReference Include="org.k2fsa.sherpa.onnx" Version="1.13.5" />
   </ItemGroup>
 
   <ItemGroup>
@@ -41,8 +44,10 @@
     <Content Include="..\..\bin\ffmpeg.exe" Link="bin\ffmpeg.exe" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\bin\whisper-cli.exe" Link="bin\whisper-cli.exe" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\bin\*.dll" Link="bin\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\..\models\ggml-large-v3-turbo-q5_0.bin" Link="models\ggml-large-v3-turbo-q5_0.bin" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\models\ggml-*.bin" Link="models\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\models\ggml-silero-v5.1.2.bin" Link="models\ggml-silero-v5.1.2.bin" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\models\pyannote-segmentation-3.0.onnx" Link="models\pyannote-segmentation-3.0.onnx" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\models\pyannote-segmentation-3.0.onnx')" />
+    <Content Include="..\..\models\3dspeaker-eres2net-base-16k.onnx" Link="models\3dspeaker-eres2net-base-16k.onnx" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\models\3dspeaker-eres2net-base-16k.onnx')" />
   </ItemGroup>
 
 </Project>

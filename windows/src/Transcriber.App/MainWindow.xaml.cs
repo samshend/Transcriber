@@ -13,13 +13,13 @@ namespace Transcriber.App;
 public sealed partial class MainWindow : Window
 {
     public LibraryViewModel Vm { get; }
-    private readonly ToolPaths _tools;
+    private ToolPaths _tools;
+    private readonly TranscriptionSettings _settings;
     private readonly DispatcherTimer _recordingTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private readonly MediaPlayer _audioMediaPlayer = new() { AutoPlay = false, Volume = 1.0 };
     private RecordingSession? _recording;
     private int _detailVersion;
 
-    private const string ModelFile = "ggml-large-v3-turbo-q5_0.bin";
     private const string VadFile = "ggml-silero-v5.1.2.bin";
 
     public MainWindow()
@@ -29,7 +29,9 @@ public sealed partial class MainWindow : Window
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Transcriber", "Library");
         Vm = new LibraryViewModel(new LibraryStore(libraryRoot));
-        _tools = ToolPaths.FromAppDirectory(AppContext.BaseDirectory, ModelFile, VadFile);
+        _settings = TranscriptionSettings.Load();
+        _tools = ToolPaths.FromAppDirectory(
+            AppContext.BaseDirectory, TranscriptionModels.Get(_settings.Quality).FileName, VadFile);
 
         InitializeComponent();
         AudioPlayer.SetMediaPlayer(_audioMediaPlayer);
@@ -43,6 +45,10 @@ public sealed partial class MainWindow : Window
                 args.Cancel = true;
                 Vm.StatusMessage = "Stop or discard the recording before closing Transcriber.";
                 RecordingWarningText.Text = Vm.StatusMessage;
+            }
+            else if (Vm.IsBusy)
+            {
+                Vm.CancelProcessing();
             }
         };
         NavList.SelectedIndex = 0;   // "All"
@@ -205,6 +211,84 @@ public sealed partial class MainWindow : Window
 
     // MARK: - Toolbar actions
 
+    private void OpenLogs_Click(object sender, RoutedEventArgs e)
+    {
+        var directory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Transcriber", "Logs");
+        Directory.CreateDirectory(directory);
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", directory)
+        {
+            UseShellExecute = true,
+        });
+    }
+
+    private async void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        var slider = new Slider
+        {
+            Minimum = 0,
+            Maximum = 2,
+            StepFrequency = 1,
+            IsThumbToolTipEnabled = false,
+            Value = (int)_settings.Quality,
+        };
+        var title = new TextBlock { FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+        var description = new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Gray),
+        };
+        var availability = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        var labels = new Grid();
+        labels.ColumnDefinitions.Add(new ColumnDefinition());
+        labels.ColumnDefinitions.Add(new ColumnDefinition());
+        labels.ColumnDefinitions.Add(new ColumnDefinition());
+        labels.Children.Add(new TextBlock { Text = "Faster", HorizontalAlignment = HorizontalAlignment.Left });
+        var balanced = new TextBlock { Text = "Balanced", HorizontalAlignment = HorizontalAlignment.Center };
+        Grid.SetColumn(balanced, 1);
+        labels.Children.Add(balanced);
+        var accurate = new TextBlock { Text = "More accurate", HorizontalAlignment = HorizontalAlignment.Right };
+        Grid.SetColumn(accurate, 2);
+        labels.Children.Add(accurate);
+        var panel = new StackPanel { Spacing = 8, Width = 440 };
+        panel.Children.Add(title);
+        panel.Children.Add(description);
+        panel.Children.Add(slider);
+        panel.Children.Add(labels);
+        panel.Children.Add(availability);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Transcription quality",
+            Content = panel,
+            PrimaryButtonText = "Save",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        void RefreshChoice()
+        {
+            var option = TranscriptionModels.Get((TranscriptionQuality)(int)Math.Round(slider.Value));
+            var modelPath = Path.Combine(AppContext.BaseDirectory, "models", option.FileName);
+            title.Text = option.Title;
+            description.Text = option.Description;
+            var installed = File.Exists(modelPath);
+            availability.Text = installed ? "Model installed and ready." : "Model is not installed. Run the Windows asset setup first.";
+            availability.Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(
+                installed ? Microsoft.UI.Colors.Green : Microsoft.UI.Colors.OrangeRed);
+            dialog.IsPrimaryButtonEnabled = installed;
+        }
+        slider.ValueChanged += (_, _) => RefreshChoice();
+        RefreshChoice();
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+
+        _settings.Quality = (TranscriptionQuality)(int)Math.Round(slider.Value);
+        _settings.Save();
+        var selected = TranscriptionModels.Get(_settings.Quality);
+        _tools = ToolPaths.FromAppDirectory(AppContext.BaseDirectory, selected.FileName, VadFile);
+        Vm.StatusMessage = $"Transcription quality: {selected.Title}.";
+    }
+
     private void StartRecording_Click(object sender, RoutedEventArgs e)
     {
         if (_recording is not null || Vm.IsBusy) return;
@@ -345,6 +429,7 @@ public sealed partial class MainWindow : Window
 
     private async void Import_Click(object sender, RoutedEventArgs e)
     {
+        if (Vm.IsBusy) return;
         var picker = new FileOpenPicker { ViewMode = PickerViewMode.List };
         foreach (var ext in new[] { ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".flac", ".mp4", ".mov", ".mkv", ".webm" })
         {
@@ -353,7 +438,15 @@ public sealed partial class MainWindow : Window
         InitializeWithWindow(picker);
         var file = await picker.PickSingleFileAsync();
         if (file is null) return;
-        await Vm.ImportAsync(file.Path, _tools, language: "auto", vocabulary: null);
+        var expectedSpeakers = await PromptForSpeakerCountAsync();
+        if (expectedSpeakers is null) return;
+        await Vm.ImportAsync(file.Path, _tools, language: "auto", vocabulary: null,
+            expectedSpeakers: expectedSpeakers.Value);
+    }
+
+    private void CancelProcessing_Click(object sender, RoutedEventArgs e)
+    {
+        Vm.CancelProcessing();
     }
 
     private async void NewProject_Click(object sender, RoutedEventArgs e)
@@ -420,6 +513,34 @@ public sealed partial class MainWindow : Window
         if (!string.IsNullOrWhiteSpace(name)) { Vm.RenameItem(vm.Id, name!.Trim()); UpdateDetail(Vm.SelectedItem); }
     }
 
+    private async void RenameSpeakers_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is not { } vm || vm.Item.Speakers.Count == 0) return;
+        var inputs = vm.Item.Speakers.Select(speaker => new TextBox
+        {
+            Header = speaker,
+            Text = speaker,
+            PlaceholderText = "Speaker name",
+        }).ToList();
+        var form = new StackPanel { Spacing = 10 };
+        foreach (var input in inputs) form.Children.Add(input);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Rename speakers",
+            Content = form,
+            PrimaryButtonText = "Save",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        Vm.RenameSpeakers(vm.Id, vm.Item.Speakers
+            .Select((speaker, index) => (speaker, inputs[index].Text))
+            .ToDictionary(pair => pair.speaker, pair => pair.Text));
+        ItemsList.SelectedItem = Vm.Items.FirstOrDefault(item => item.Id == vm.Id);
+        UpdateDetail(Vm.SelectedItem);
+    }
+
     private async void Delete_Click(object sender, RoutedEventArgs e)
     {
         if (ItemOf(sender) is not { } vm) return;
@@ -454,6 +575,36 @@ public sealed partial class MainWindow : Window
             DefaultButton = ContentDialogButton.Primary,
         };
         return await dialog.ShowAsync() == ContentDialogResult.Primary ? input.Text : null;
+    }
+
+    private async Task<int?> PromptForSpeakerCountAsync()
+    {
+        var selector = new ComboBox { Header = "How many people are speaking?", SelectedIndex = 1 };
+        foreach (var option in new[]
+        {
+            ("Auto-detect (experimental)", -1), ("2 speakers", 2), ("3 speakers", 3),
+            ("4 speakers", 4), ("5 speakers", 5), ("6 speakers", 6),
+        })
+            selector.Items.Add(new ComboBoxItem { Content = option.Item1, Tag = option.Item2 });
+        var explanation = new TextBlock
+        {
+            Text = "Choosing the count is more reliable for compressed meeting recordings.",
+            TextWrapping = TextWrapping.Wrap,
+        };
+        var content = new StackPanel { Spacing = 10 };
+        content.Children.Add(explanation);
+        content.Children.Add(selector);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Speaker detection",
+            Content = content,
+            PrimaryButtonText = "Transcribe",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return null;
+        return selector.SelectedItem is ComboBoxItem item && item.Tag is int count ? count : -1;
     }
 
     /// <summary>Unpackaged pickers/dialogs need the owning window handle.</summary>
