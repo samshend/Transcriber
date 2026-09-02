@@ -42,7 +42,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Support/Transcriber-AppStore.entitlements
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         # Hardened runtime + sandbox together is the standard App Store posture,
         # and the bundled CLI tools are signed with it (see the build phase below).
         ENABLE_HARDENED_RUNTIME: YES

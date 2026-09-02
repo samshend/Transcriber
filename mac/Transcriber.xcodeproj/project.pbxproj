@@ -17,6 +17,7 @@
 		2D0E25DAADB2DF1EB122B7CD /* ModelManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50CCFCF6E14D9FC54B234679 /* ModelManager.swift */; };
 		30AB681CB8BAA4BB40FD345C /* MeetingNotifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B63A7078453C84A081B05391 /* MeetingNotifier.swift */; };
 		3ECEF7F773374C5AA66F29F2 /* MCPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 931E333C5E1C089DA3578653 /* MCPServer.swift */; };
+		415863D10C34030AF53CD832 /* DualTrackTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53138E3CCBF7D2F179D57228 /* DualTrackTranscriber.swift */; };
 		514A5AD62C683E4B5BAF5FF1 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = BC2DCC8C2CB2A896CDB58B41 /* FluidAudio */; };
 		5219531F122BA95E35EC353A /* Library.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B8B84C1BF35CE7CED996B10 /* Library.swift */; };
 		562E813BC6DA920550990840 /* Languages.swift in Sources */ = {isa = PBXBuildFile; fileRef = E738CCD862BD0BD81FAEF62E /* Languages.swift */; };
@@ -28,6 +29,7 @@
 		8659A09B16C029A3CFEA201C /* LlamaServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C04F2092D86CAA28E36564B /* LlamaServer.swift */; };
 		8F1A02477AD87F70E2E23F2E /* AskAssistant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CD11C33884087363C056DFA /* AskAssistant.swift */; };
 		8F7A196B6CFB316BD21435D4 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3606231216878DA36BAB4FD /* SettingsView.swift */; };
+		9262A4894DA5AE431BF31B7B /* MixedLanguageRepair.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E6C62071ABEC88EE2A844F9 /* MixedLanguageRepair.swift */; };
 		92B575D56C6DAFB833F0F3D3 /* MeetingDetection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8E2E27F0B8D65B7414FFA25 /* MeetingDetection.swift */; };
 		95AF5C1A779DD23F7935CAE8 /* Summarizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 758ADA86F06A974A171E0618 /* Summarizer.swift */; };
 		9619725D63B6D245704D7C67 /* AudioRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EE2752E591446603ADA449F /* AudioRecorder.swift */; };
@@ -51,7 +53,9 @@
 		3208C6E364BEA02D42CB3805 /* TranscriberApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriberApp.swift; sourceTree = "<group>"; };
 		395DF98173BF0FCB3ED31555 /* TranscriptMerger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptMerger.swift; sourceTree = "<group>"; };
 		3CD11C33884087363C056DFA /* AskAssistant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskAssistant.swift; sourceTree = "<group>"; };
+		4E6C62071ABEC88EE2A844F9 /* MixedLanguageRepair.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MixedLanguageRepair.swift; sourceTree = "<group>"; };
 		50CCFCF6E14D9FC54B234679 /* ModelManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelManager.swift; sourceTree = "<group>"; };
+		53138E3CCBF7D2F179D57228 /* DualTrackTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DualTrackTranscriber.swift; sourceTree = "<group>"; };
 		55A1CBF9245A0C6588521024 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5873C79C25E7D54D79362B75 /* FileRenamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileRenamer.swift; sourceTree = "<group>"; };
 		5C04F2092D86CAA28E36564B /* LlamaServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LlamaServer.swift; sourceTree = "<group>"; };
@@ -109,6 +113,7 @@
 				8EE2752E591446603ADA449F /* AudioRecorder.swift */,
 				1527C470FF9940C44F8FEE0F /* ContentView.swift */,
 				6562CA0BAAB89E9775B08FFF /* Diarizer.swift */,
+				53138E3CCBF7D2F179D57228 /* DualTrackTranscriber.swift */,
 				9ED154220C5F3D50F7F26D02 /* Engine.swift */,
 				5873C79C25E7D54D79362B75 /* FileRenamer.swift */,
 				CE84E266653051B4B574D2B6 /* Inbox.swift */,
@@ -124,6 +129,7 @@
 				E8E2E27F0B8D65B7414FFA25 /* MeetingDetection.swift */,
 				B63A7078453C84A081B05391 /* MeetingNotifier.swift */,
 				2AC42D5DE5DD59FA49C13E1E /* MeetingWatcher.swift */,
+				4E6C62071ABEC88EE2A844F9 /* MixedLanguageRepair.swift */,
 				50CCFCF6E14D9FC54B234679 /* ModelManager.swift */,
 				D2586011B2B1358D86CBAA59 /* MultilingualTranscriber.swift */,
 				BCDA4A3C48032A22548CAB36 /* RecordingViews.swift */,
@@ -267,6 +273,7 @@
 				9619725D63B6D245704D7C67 /* AudioRecorder.swift in Sources */,
 				C0FB19D55CA1502059033A85 /* ContentView.swift in Sources */,
 				1C73C4E87F28944EC243E8A2 /* Diarizer.swift in Sources */,
+				415863D10C34030AF53CD832 /* DualTrackTranscriber.swift in Sources */,
 				0F67F0EA30A197EF141E21D4 /* Engine.swift in Sources */,
 				864DF09AFDC790CE60309B53 /* FileRenamer.swift in Sources */,
 				7379B1BEC9D1CDB31D59045E /* Inbox.swift in Sources */,
@@ -282,6 +289,7 @@
 				92B575D56C6DAFB833F0F3D3 /* MeetingDetection.swift in Sources */,
 				30AB681CB8BAA4BB40FD345C /* MeetingNotifier.swift in Sources */,
 				C9399F7D71595B5F363DEFF2 /* MeetingWatcher.swift in Sources */,
+				9262A4894DA5AE431BF31B7B /* MixedLanguageRepair.swift in Sources */,
 				2D0E25DAADB2DF1EB122B7CD /* ModelManager.swift in Sources */,
 				0BBF50826D4AF5C99BCAF699 /* MultilingualTranscriber.swift in Sources */,
 				E787BC164B46886ECA8791C0 /* RecordingViews.swift in Sources */,
@@ -307,7 +315,7 @@
 				CODE_SIGN_ENTITLEMENTS = "Support/Transcriber-AppStore.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Support/Info.plist;
@@ -329,7 +337,7 @@
 				CODE_SIGN_ENTITLEMENTS = "Support/Transcriber-AppStore.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Support/Info.plist;
