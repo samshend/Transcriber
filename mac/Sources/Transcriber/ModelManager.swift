@@ -13,16 +13,16 @@ struct WhisperModel: Identifiable, Hashable {
 
     static let all: [WhisperModel] = [
         WhisperModel(
-            id: "large-v3-turbo-q5_0",
-            displayName: "Large v3 Turbo (compressed)",
-            sizeMB: 574,
-            note: "Recommended: near best-in-class accuracy, fast, all languages."
-        ),
-        WhisperModel(
             id: "large-v3-turbo",
             displayName: "Large v3 Turbo (full)",
             sizeMB: 1620,
-            note: "Slightly better accuracy than the compressed variant, uses more RAM."
+            note: "Recommended: best accuracy, all languages. Larger download, more RAM."
+        ),
+        WhisperModel(
+            id: "large-v3-turbo-q5_0",
+            displayName: "Large v3 Turbo (compressed)",
+            sizeMB: 574,
+            note: "Smaller download, nearly as accurate. Good if disk or RAM is tight."
         ),
         WhisperModel(
             id: "small",

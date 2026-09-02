@@ -7,7 +7,11 @@
 	<key>CFBundleExecutable</key>
 	<string>Transcriber</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.semen.transcriber</string>
+	<string>com.samshend.transcriber</string>
+	<!-- Only standard HTTPS (model download) — exempt encryption. Skips the
+	     export-compliance question on every TestFlight/App Store submission. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

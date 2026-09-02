@@ -39,7 +39,7 @@ final class AppleScriptRunner: NSObject {
                 loop.run(mode: .default, before: .distantFuture)
             }
         }
-        runnerThread.name = "dev.semen.transcriber.applescript"
+        runnerThread.name = "com.samshend.transcriber.applescript"
         runnerThread.stackSize = 1 << 20
         self.thread = runnerThread
         super.init()

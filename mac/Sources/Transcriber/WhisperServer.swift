@@ -55,9 +55,26 @@ actor WhisperServer {
         throw ServerFailure(message: "did not become ready in time")
     }
 
+    /// One word with the audio time-range it was spoken in (seconds, relative to the clip
+    /// that was sent). The mixed-language repair pass needs these to slice out the exact
+    /// audio behind a transliterated word and re-transcribe it under a forced language.
+    struct Word: Sendable {
+        let text: String
+        let start: Double
+        let end: Double
+    }
+
     /// Transcribes one chunk. `language` nil means auto-detect.
     /// Returns the text and the language whisper detected/used.
     func transcribe(wav: URL, language: String?) async throws -> (text: String, language: String?) {
+        let out = try await transcribeWords(wav: wav, language: language)
+        return (out.text, out.language)
+    }
+
+    /// Like `transcribe`, but also returns per-word timestamps. `verbose_json` (which we
+    /// already request) carries `segments[].words[]` with `word/start/end`; the plain
+    /// `transcribe` path just discards them.
+    func transcribeWords(wav: URL, language: String?) async throws -> (text: String, language: String?, words: [Word]) {
         guard process?.isRunning == true else {
             throw ServerFailure(message: "not running")
         }
@@ -85,9 +102,18 @@ actor WhisperServer {
 
         let (data, _) = try await URLSession.shared.data(for: request)
         struct Response: Decodable {
+            struct Segment: Decodable {
+                struct W: Decodable {
+                    let word: String
+                    let start: Double
+                    let end: Double
+                }
+                let words: [W]?
+            }
             let text: String?
             let language: String?
             let error: String?
+            let segments: [Segment]?
         }
         guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
             throw ServerFailure(message: "unexpected response: \(String(data: data.prefix(200), encoding: .utf8) ?? "?")")
@@ -95,7 +121,9 @@ actor WhisperServer {
         if let error = decoded.error {
             throw ServerFailure(message: error)
         }
-        return (decoded.text ?? "", decoded.language)
+        let words = (decoded.segments ?? []).flatMap { $0.words ?? [] }
+            .map { Word(text: $0.word, start: $0.start, end: $0.end) }
+        return (decoded.text ?? "", decoded.language, words)
     }
 
     func stop() {

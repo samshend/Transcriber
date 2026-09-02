@@ -16,17 +16,30 @@ final class AudioPlayerModel: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private var player: AVAudioPlayer?
     private var ticker: Timer?
 
-    func load(_ url: URL?) {
+    /// Points the player at `url`. `knownDuration` (from the transcript's metadata) fills the
+    /// scrubber instantly; the AVAudioPlayer itself is built off the main thread because
+    /// `AVAudioPlayer(contentsOf:)` + `prepareToPlay()` on a large recording blocks the UI while
+    /// the transcript is trying to appear.
+    func load(_ url: URL?, knownDuration: Double = 0) {
         guard loadedURL != url else { return }
         stop()
         loadedURL = url
-        duration = 0
+        duration = knownDuration
         currentTime = 0
-        guard let url, FileManager.default.fileExists(atPath: url.path) else { player = nil; return }
-        player = try? AVAudioPlayer(contentsOf: url)
-        player?.delegate = self
-        player?.prepareToPlay()
-        duration = player?.duration ?? 0
+        player = nil
+        guard let url, FileManager.default.fileExists(atPath: url.path) else { return }
+        Task.detached(priority: .userInitiated) {
+            let built = try? AVAudioPlayer(contentsOf: url)
+            built?.prepareToPlay()
+            await MainActor.run {
+                // The selection may have moved on while we were decoding — only keep the
+                // player if it still matches what's on screen.
+                guard self.loadedURL == url, let built else { return }
+                built.delegate = self
+                self.player = built
+                if self.duration <= 0 { self.duration = built.duration }
+            }
+        }
     }
 
     func togglePlay() {
@@ -259,6 +272,10 @@ struct TranscriptDetailColumn: View {
     @EnvironmentObject private var app: AppState
     @StateObject private var audio = AudioPlayerModel()
     @State private var bodyText = ""
+    /// The transcript split into paragraphs (speaker turns, the title, the summary). Rendered as
+    /// one `Text` each inside a `LazyVStack` so only on-screen turns lay out — a single `Text`
+    /// over the whole transcript with `.textSelection` costs seconds to lay out on selection.
+    @State private var paragraphs: [String] = []
     @State private var renaming = false
     @State private var renamingSpeakers = false
     @State private var confirmingDelete = false
@@ -310,10 +327,19 @@ struct TranscriptDetailColumn: View {
             Divider()
 
             ScrollView {
-                Text(bodyText.isEmpty ? "…" : bodyText)
-                    .font(.body).textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if paragraphs.isEmpty {
+                    Text("…").font(.body).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding()
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, para in
+                            Text(para)
+                                .font(.body).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
                     .padding()
+                }
             }
         }
         .toolbar { detailToolbar(item) }
@@ -361,14 +387,26 @@ struct TranscriptDetailColumn: View {
     }
 
     private func load(_ item: LibraryItem?) {
-        guard let item else { audio.load(nil); bodyText = ""; return }
-        audio.load(app.library.audioURL(for: item))
+        guard let item else { audio.load(nil); bodyText = ""; paragraphs = []; return }
+        audio.load(app.library.audioURL(for: item), knownDuration: item.durationSeconds ?? 0)
         let url = app.library.transcriptURL(for: item)
         if let content = try? String(contentsOf: url, encoding: .utf8) {
             bodyText = MarkdownWriter.contentWithoutFrontmatter(content)
+            paragraphs = Self.paragraphs(from: bodyText)
         } else {
             bodyText = ""
+            paragraphs = []
         }
+    }
+
+    /// Splits the transcript body on blank lines so each speaker turn (and the title/summary)
+    /// becomes its own paragraph. A turn keeps its internal single newlines
+    /// (`**Speaker**` / time / text), only blank-line gaps between turns are the split points.
+    private static func paragraphs(from body: String) -> [String] {
+        body
+            .components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .newlines) }
+            .filter { !$0.isEmpty }
     }
 }
 
@@ -447,6 +485,10 @@ struct ItemMenu: View {
         if !item.hasSummary {
             Button { app.summarize(item: item) } label: { Label("Summarize", systemImage: "sparkles") }
         }
+        // Mixed-language repair (variant B) is shelved: on real audio it over-triggers and
+        // corrupts more spans than it fixes with the local model. The implementation and its
+        // --selftest-mixrepair harness are kept for a future revisit with a stronger model, but
+        // the button is not exposed. See MixedLanguageRepair.swift.
         Button { app.ask(item: item, target: .claude) } label: { Label("Ask Claude", systemImage: "terminal") }
         Button { app.ask(item: item, target: .chatGPT) } label: {
             Label("Ask ChatGPT", systemImage: "bubble.left.and.text.bubble.right")

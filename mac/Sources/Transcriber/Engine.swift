@@ -205,11 +205,31 @@ struct WhisperTranscription {
 enum Whisper {
     /// Flags that improve accuracy without changing the model.
     ///
+    /// `-mc 0` disables carrying previously-decoded text forward as context. whisper-cli
+    /// defaults to `--max-context -1` (unlimited), which on long, repetitive audio — e.g. a
+    /// language lesson that drills the same phrase — spirals into a runaway repetition loop:
+    /// one real hour-long recording collapsed into "Я был в Италии" ~80× over seven minutes of
+    /// ordinary speech. Isolated slices of that same audio transcribe cleanly, confirming the
+    /// loop is driven by accumulated context, not the audio.
+    ///
+    /// Do NOT be tempted to "keep a little context" with a small positive cap — it is worse,
+    /// not a compromise. Sweeping this exact file (large-v3-turbo-q5_0, VAD on):
+    ///   -mc -1 → 3.1k chars, 38% repeated   (the reported bug)
+    ///   -mc 128 → 5.7k, 26% ("I was? I was?" loop)
+    ///   -mc  64 → 1.2k, collapses to "я / ян"
+    ///   -mc  32 → 8.1k, 58% ("Оля."×196 — worst of all)
+    ///   -mc   0 → 11.0k chars, 7% repeated  (clean; 3.5× more real content than default)
+    /// The loop phrase is only a few tokens, so any window that carries ≥ that many prior
+    /// tokens can reseed it and defeat the temperature-fallback safeguard. Only zero is robust.
+    /// VAD still gives each window its own local context; we cut only the cross-window carry.
+    /// `--carry-initial-prompt` still re-injects the vocabulary bias each window, so `-mc 0`
+    /// does not weaken the `--prompt` feature.
+    ///
     /// `--vad` is the important one: it stops whisper from hallucinating sentences in silence.
     /// `--suppress-nst` drops non-speech tokens. `--prompt` biases decoding toward a supplied
     /// vocabulary, which is how domain terms and proper nouns get spelled correctly.
     static func accuracyArguments(vadModel: URL?, initialPrompt: String?) -> [String] {
-        var arguments: [String] = []
+        var arguments: [String] = ["-mc", "0"]
         if let vadModel {
             arguments += ["--vad", "-vm", vadModel.path, "--suppress-nst"]
         }

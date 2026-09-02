@@ -1,0 +1,51 @@
+# XcodeGen spec — regenerates Transcriber.xcodeproj deterministically.
+#   brew install xcodegen && cd mac && xcodegen generate
+#
+# This is the App Store / TestFlight app target. The existing SwiftPM Package.swift
+# stays for CLI/selftest builds; this project drives archiving to App Store Connect,
+# which SwiftPM cannot do (no embeddable provisioning profile).
+
+name: Transcriber
+
+options:
+  bundleIdPrefix: com.samshend
+  deploymentTarget:
+    macOS: "14.4"
+  createIntermediateGroups: true
+
+packages:
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio.git
+    exactVersion: 0.15.5
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: AUHHAT2Z56
+    SWIFT_VERSION: "5.0"
+
+targets:
+  Transcriber:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Transcriber
+      - path: Support/Assets.xcassets
+    dependencies:
+      - package: FluidAudio
+    settings:
+      base:
+        PRODUCT_NAME: Transcriber
+        PRODUCT_BUNDLE_IDENTIFIER: com.samshend.transcriber
+        INFOPLIST_FILE: Support/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: Support/Transcriber-AppStore.entitlements
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        # Hardened runtime + sandbox together is the standard App Store posture,
+        # and the bundled CLI tools are signed with it (see the build phase below).
+        ENABLE_HARDENED_RUNTIME: YES
+    postBuildScripts:
+      - script: '"$SRCROOT/Scripts/appstore-bundle-tools.sh"'
+        name: Bundle & sign CLI tools (ffmpeg, whisper-cli)

@@ -66,6 +66,32 @@ enum SelfTest {
             semaphore.wait()
             exit(0)
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--selftest-dualtrack"),
+           CommandLine.arguments.count > index + 2 {
+            let mic = CommandLine.arguments[index + 1]
+            let system = CommandLine.arguments[index + 2]
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                do { try await runDualTrack(mic: mic, system: system); print("SELFTEST OK") }
+                catch { print("SELFTEST FAILED: \(error.localizedDescription)") }
+                semaphore.signal()
+            }
+            semaphore.wait()
+            exit(0)
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--selftest-mixrepair"),
+           CommandLine.arguments.count > index + 2 {
+            let transcript = CommandLine.arguments[index + 1]
+            let audio = CommandLine.arguments[index + 2]
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                do { try await runMixRepair(transcript: transcript, audio: audio); print("SELFTEST OK") }
+                catch { print("SELFTEST FAILED: \(error.localizedDescription)") }
+                semaphore.signal()
+            }
+            semaphore.wait()
+            exit(0)
+        }
         let modes = ["--selftest-diarize", "--selftest-multilingual"]
         guard let (mode, index) = modes
             .compactMap({ m in CommandLine.arguments.firstIndex(of: m).map { (m, $0) } })
@@ -301,6 +327,79 @@ enum SelfTest {
             failures.append("a completely silent mic must warn")
         }
 
+        // Dual-track attribution: two single-speaker tracks merge onto one timeline by start,
+        // keeping overlaps (both talking at once) as separate blocks rather than dropping one.
+        let micBlocks = [
+            TranscriptBlock(speaker: "Speaker 1", start: 0, end: 2, text: "hi there"),
+            TranscriptBlock(speaker: "Speaker 1", start: 5, end: 7, text: "still me"),
+        ]
+        let systemBlocks = [
+            TranscriptBlock(speaker: "Speaker 2", start: 1.5, end: 3, text: "overlap"),
+            TranscriptBlock(speaker: "Speaker 2", start: 8, end: 9, text: "far side"),
+        ]
+        let mergedTracks = DualTrackTranscriber.mergeByTimeline(micBlocks, systemBlocks)
+        if mergedTracks.count != 4 { failures.append("merge must keep all blocks incl. overlap, got \(mergedTracks.count)") }
+        if mergedTracks.map(\.start) != [0, 1.5, 5, 8] {
+            failures.append("merged blocks must be ordered by start: \(mergedTracks.map(\.start))")
+        }
+        // The bigger-text side's languages come first (dominant language leads the frontmatter).
+        let langs = DualTrackTranscriber.mergeLanguages(
+            mic: [TranscriptBlock(speaker: "Speaker 1", start: 0, end: 1, text: String(repeating: "a", count: 100))],
+            micLangs: ["ru", "de"],
+            system: [TranscriptBlock(speaker: "Speaker 2", start: 0, end: 1, text: "short")],
+            systemLangs: ["en", "de"]
+        )
+        if langs != ["ru", "de", "en"] {
+            failures.append("merged languages should union with the dominant side first: \(langs)")
+        }
+
+        // Mixed-language repair: splice re-transcribed native text back into a block, keeping
+        // whisper's own spacing for untouched words.
+        let repairWords = [
+            WhisperServer.Word(text: " Итак", start: 0, end: 0.5),
+            WhisperServer.Word(text: " это", start: 0.5, end: 0.8),
+            WhisperServer.Word(text: " натюрлих", start: 0.8, end: 1.4),   // transliterated "natürlich"
+            WhisperServer.Word(text: " хорошо", start: 1.4, end: 2.0),
+        ]
+        let repaired = MixedLanguageRepair.rebuild(
+            words: repairWords,
+            spans: [MixedLanguageRepair.Span(from: 2, to: 2, language: "de")],
+            replacements: ["natürlich"]
+        )
+        if repaired != "Итак это natürlich хорошо" {
+            failures.append("repair should splice the native word in place: \(repaired)")
+        }
+        // No spans → the text is rebuilt verbatim from the words.
+        if MixedLanguageRepair.rebuild(words: repairWords, spans: [], replacements: []) != "Итак это натюрлих хорошо" {
+            failures.append("repair with no spans must reproduce the original words")
+        }
+        // validSpans drops out-of-range, inverted, and overlapping spans; keeps ordered ones.
+        let cleaned = MixedLanguageRepair.validSpans(
+            locateSpans: [
+                .init(from: 5, to: 5, language: "de"),   // out of range
+                .init(from: 3, to: 1, language: "de"),   // inverted
+                .init(from: 0, to: 1, language: "de"),   // valid
+                .init(from: 1, to: 2, language: "de"),   // overlaps the previous
+                .init(from: 2, to: 3, language: ""),     // blank language
+            ],
+            wordCount: 4
+        )
+        if cleaned != [MixedLanguageRepair.Span(from: 0, to: 1, language: "de")] {
+            failures.append("validSpans must keep only in-range, ordered, non-overlapping spans: \(cleaned)")
+        }
+        // Timestamp label parsing (block start → seconds).
+        if MixedLanguageRepair.seconds(fromLabel: "02:36") != 156 { failures.append("02:36 must parse to 156s") }
+        if MixedLanguageRepair.seconds(fromLabel: "1:02:36") != 3756 { failures.append("1:02:36 must parse to 3756s") }
+        if MixedLanguageRepair.seconds(fromLabel: "nope") != nil { failures.append("a malformed time must parse to nil") }
+        // The frontmatter marker is inserted once, before the closing '---', and refreshed not duplicated.
+        let stamped = MixedLanguageRepair.withRepairMarker("---\nlanguage: ru, de\n---\n\nbody")
+        if !stamped.contains("mixed_language_repair: applied\n---") {
+            failures.append("repair marker must be stamped inside the frontmatter: \(stamped)")
+        }
+        if MixedLanguageRepair.withRepairMarker(stamped).components(separatedBy: "mixed_language_repair:").count != 2 {
+            failures.append("re-stamping must not duplicate the repair marker")
+        }
+
         // Deciding the final file from what actually got captured. An empty track must never
         // become the recording — that is the header-only ".m4a" that failed with "moov atom not
         // found" on a fresh machine where the microphone delivered no frames.
@@ -397,8 +496,11 @@ enum SelfTest {
         if !withVAD.contains("--vad") || !withVAD.contains(vadURL.path) {
             failures.append("VAD flags missing: \(withVAD)")
         }
-        if !Whisper.accuracyArguments(vadModel: nil, initialPrompt: nil).isEmpty {
-            failures.append("no VAD model and no vocabulary should add no flags")
+        // Context-carry is always disabled (`-mc 0`) to avoid the repetition-loop collapse; with
+        // no VAD model and no vocabulary those are the only flags accuracyArguments should add.
+        let bare = Whisper.accuracyArguments(vadModel: nil, initialPrompt: nil)
+        if bare != ["-mc", "0"] {
+            failures.append("bare args should be exactly -mc 0, got \(bare)")
         }
         let withVocab = Whisper.accuracyArguments(vadModel: nil, initialPrompt: "NIE, TIE, arraigo")
         guard let promptIndex = withVocab.firstIndex(of: "--prompt"),
@@ -412,8 +514,8 @@ enum SelfTest {
             failures.append("vocabulary bias must be carried across windows")
         }
         // Whitespace-only vocabulary must not become a --prompt with an empty value.
-        if !Whisper.accuracyArguments(vadModel: nil, initialPrompt: "   \n ").isEmpty {
-            failures.append("blank vocabulary should add no flags")
+        if Whisper.accuracyArguments(vadModel: nil, initialPrompt: "   \n ") != ["-mc", "0"] {
+            failures.append("blank vocabulary should add no --prompt flag")
         }
 
         if failures.isEmpty {
@@ -1069,6 +1171,141 @@ enum SelfTest {
         print("languages: \(output.languages.joined(separator: ", "))")
         print("--- transcript ---")
         print(MarkdownWriter.diarizedBody(blocks: output.blocks))
+    }
+
+    /// Exercises the deterministic dual-track path end to end on two real per-speaker tracks:
+    ///   Transcriber --selftest-dualtrack mic.m4a system.m4a [--allowed ru,de,en]
+    /// Mirrors what AppState does when a recording kept isolated mic/system tracks.
+    private static func runDualTrack(mic: String, system: String) async throws {
+        guard let ffmpeg = Tools.find("ffmpeg") else { throw RecorderError(message: "ffmpeg not found") }
+        guard let server = Tools.find("whisper-server") else { throw RecorderError(message: "whisper-server not found") }
+        let ffprobe = Tools.find("ffprobe")
+        let model = WhisperModel.byID("large-v3-turbo-q5_0")
+        let modelURL = ModelManager.modelsDirectory.appendingPathComponent(model.fileName)
+
+        var allowed: [String] = []
+        if let index = CommandLine.arguments.firstIndex(of: "--allowed"),
+           CommandLine.arguments.count > index + 1 {
+            allowed = Languages.ordered(Set(CommandLine.arguments[index + 1].split(separator: ",").map(String.init)))
+            print("allowed languages: \(allowed.joined(separator: ", "))")
+        }
+
+        let micURL = URL(fileURLWithPath: mic)
+        let systemURL = URL(fileURLWithPath: system)
+        let usable = await AppState.tracksUsable(mic: micURL, system: systemURL, ffmpeg: ffmpeg, ffprobe: ffprobe)
+        print("tracks usable (both carry speech): \(usable)")
+
+        let transcribeTrack: (URL, String, @escaping (Double) -> Void) async throws -> (blocks: [TranscriptBlock], languages: [String]) = { trackURL, speaker, progress in
+            print("  [\(speaker)] converting…")
+            let trackWav = try await FFmpeg.convertToWav(input: trackURL, ffmpeg: ffmpeg)
+            defer { try? FileManager.default.removeItem(at: trackWav) }
+            let dur = await FFmpeg.duration(of: trackWav, ffprobe: ffprobe ?? ffmpeg) ?? 0
+            let whole = [SpeakerSegment(speaker: speaker, start: 0, end: max(dur, 0.1))]
+            let out = try await MultilingualTranscriber.transcribe(
+                wav: trackWav, speakers: whole, model: modelURL, ffmpeg: ffmpeg,
+                serverBinary: server, allowedLanguages: allowed, onProgress: progress
+            )
+            return (out.blocks, out.languages)
+        }
+
+        let output = try await DualTrackTranscriber.transcribe(
+            micWav: micURL, systemWav: systemURL,
+            onProgress: { print(String(format: "  progress %.0f%%", $0 * 100)) },
+            transcribeTrack: transcribeTrack
+        )
+        await WhisperServer.shared.stop()
+        print("languages: \(output.languages.joined(separator: ", "))")
+        print("--- transcript ---")
+        print(MarkdownWriter.diarizedBody(blocks: output.blocks))
+    }
+
+    /// Exercises the mixed-language repair path end to end against a real transcript + its mixed
+    /// audio, WITHOUT touching the original file (works on a temp copy):
+    ///   Transcriber --selftest-mixrepair transcript.md audio.m4a [--llm qwen3.5-4b-q5]
+    /// Mirrors AppState.runMixedLanguageRepair, printing the LLM candidates, the located spans,
+    /// and a before/after diff of each repaired block so the wiring can be verified by eye.
+    private static func runMixRepair(transcript: String, audio: String) async throws {
+        struct RepairError: LocalizedError { let message: String; var errorDescription: String? { message } }
+        guard let ffmpeg = Tools.find("ffmpeg") else { throw RecorderError(message: "ffmpeg not found") }
+        guard let server = Tools.find("whisper-server") else { throw RecorderError(message: "whisper-server not found") }
+        let ffprobe = Tools.find("ffprobe")
+
+        let whisperModel = ModelManager.modelsDirectory.appendingPathComponent(WhisperModel.byID("large-v3-turbo-q5_0").fileName)
+        var llmID = "qwen3.5-4b-q5"
+        if let index = CommandLine.arguments.firstIndex(of: "--llm"), CommandLine.arguments.count > index + 1 {
+            llmID = CommandLine.arguments[index + 1]
+        }
+        let llmModel = ModelManager.modelsDirectory.appendingPathComponent(LLMModel.byID(llmID).fileName)
+        guard FileManager.default.fileExists(atPath: whisperModel.path) else { throw RepairError(message: "whisper model not downloaded at \(whisperModel.path)") }
+        guard FileManager.default.fileExists(atPath: llmModel.path) else { throw RepairError(message: "LLM model not downloaded at \(llmModel.path)") }
+        print("whisper: \(whisperModel.lastPathComponent)   llm: \(llmModel.lastPathComponent)")
+
+        let content = try String(contentsOf: URL(fileURLWithPath: transcript), encoding: .utf8)
+        let declared = MarkdownWriter.declaredLanguages(from: content)
+        let refs = TranscriptIndex.blocks(in: MarkdownWriter.transcriptBody(from: content))
+            .filter { $0.speaker != nil && $0.time != nil }
+        guard !refs.isEmpty else { throw RepairError(message: "no timestamped speaker turns") }
+        print("declared languages: \(declared.joined(separator: ", "))   turns: \(refs.count)")
+
+        let wav = try await FFmpeg.convertToWav(input: URL(fileURLWithPath: audio), ffmpeg: ffmpeg)
+        defer { try? FileManager.default.removeItem(at: wav) }
+        let totalDuration = await FFmpeg.duration(of: wav, ffprobe: ffprobe ?? ffmpeg) ?? 0
+
+        var blocks: [TranscriptBlock] = []
+        for (i, ref) in refs.enumerated() {
+            let start = MixedLanguageRepair.seconds(fromLabel: ref.time ?? "") ?? 0
+            let nextStart = i + 1 < refs.count
+                ? (MixedLanguageRepair.seconds(fromLabel: refs[i + 1].time ?? "") ?? totalDuration)
+                : totalDuration
+            blocks.append(TranscriptBlock(speaker: ref.speaker ?? "Speaker 1", start: start, end: max(start + 0.1, nextStart), text: ref.text))
+        }
+        let original = blocks
+
+        try await WhisperServer.shared.ensureRunning(model: whisperModel, serverBinary: server)
+        try await LlamaServer.shared.ensureRunning(model: llmModel)
+        let languageHint = declared.isEmpty ? "the languages spoken" : declared.joined(separator: ", ")
+
+        let result = try await MixedLanguageRepair.repair(
+            blocks: blocks,
+            findCandidates: { blocks in
+                let c = try await AppState.mixedLanguageCandidates(blocks: blocks, languages: languageHint)
+                print("LLM candidate blocks: \(c)")
+                return c
+            },
+            wordsForBlock: { index in
+                let block = blocks[index]
+                let clipStart = max(0, block.start - 0.12)
+                let clip = try await FFmpeg.extract(from: wav, start: block.start, end: block.end, ffmpeg: ffmpeg)
+                defer { try? FileManager.default.removeItem(at: clip) }
+                let out = try await WhisperServer.shared.transcribeWords(wav: clip, language: nil)
+                return out.words.map { WhisperServer.Word(text: $0.text, start: clipStart + $0.start, end: clipStart + $0.end) }
+            },
+            locateSpans: { words in
+                let spans = try await AppState.locateTransliteratedSpans(words: words, languages: languageHint)
+                if !spans.isEmpty {
+                    let preview = spans.map { s in "\(s.language)[\(s.from)-\(s.to)]:\"\(words[s.from...min(s.to, words.count - 1)].map { $0.text }.joined().trimmingCharacters(in: .whitespaces))\"" }
+                    print("  located: \(preview.joined(separator: "  "))")
+                }
+                return spans
+            },
+            retranscribeSpan: { start, end, language in
+                let clip = try await FFmpeg.extract(from: wav, start: start, end: end, ffmpeg: ffmpeg)
+                defer { try? FileManager.default.removeItem(at: clip) }
+                let out = try await WhisperServer.shared.transcribe(wav: clip, language: language)
+                print("    [\(language)] \(String(format: "%.2f–%.2f", start, end)) → \"\(out.text.trimmingCharacters(in: .whitespaces))\"")
+                return out.text
+            }
+        )
+        await WhisperServer.shared.stop()
+        await LlamaServer.shared.stop()
+
+        print("\n=== repaired \(result.repairedSpanCount) span(s) ===")
+        for (i, block) in result.blocks.enumerated() where block.text != original[i].text {
+            print("- [\(original[i].speaker) @ \(String(format: "%.1fs", original[i].start))]")
+            print("  before: \(original[i].text)")
+            print("  after:  \(block.text)")
+        }
+        if result.repairedSpanCount == 0 { print("(no changes — transcript left as-is)") }
     }
 
     private static func run(path: String) async throws {

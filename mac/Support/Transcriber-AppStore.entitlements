@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  App Store / TestFlight entitlements — App Sandbox ON. This is deliberately
+  distinct from Support/Transcriber.entitlements (the Developer-ID / notarized
+  DMG path, which is NOT sandboxed and keeps AppleEvents automation).
+
+  Intentionally omitted for the Store build:
+    - com.apple.security.automation.apple-events  (Chrome meeting-detection —
+      needs a temporary-exception array that Store review routinely rejects)
+-->
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- Microphone capture for recording meetings / voice notes. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- Open source files and save transcripts to a user-chosen location. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- Remember the chosen output folder across launches (security-scoped bookmark). -->
+    <key>com.apple.security.files.bookmarks.app-scope</key>
+    <true/>
+
+    <!-- Download the speech model on first run. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

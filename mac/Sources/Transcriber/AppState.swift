@@ -26,6 +26,9 @@ final class AppState: ObservableObject {
     /// Jobs the user asked to stop but whose external process hasn't wound down yet.
     /// Drives the transient "Stopping…" state in the queue row.
     @Published private(set) var stoppingJobIDs: Set<UUID> = []
+    /// Library items with a mixed-language repair pass in flight, so the row can show a
+    /// spinner and the menu item can be disabled while it runs (it's slow — many whisper calls).
+    @Published private(set) var repairingItemIDs: Set<UUID> = []
 
     @Published var modelID: String { didSet { defaults.set(modelID, forKey: "modelID") } }
     @Published var language: String { didSet { defaults.set(language, forKey: "language") } }
@@ -200,6 +203,211 @@ final class AppState: ObservableObject {
                 alertMessage = error.localizedDescription
             }
         }
+    }
+
+    /// Whether the mixed-language repair button should be offered for this item: it needs a
+    /// diarized, multilingual transcript (that's where transliteration happens), the audio to
+    /// re-read, and a local LLM to locate the foreign words. Nothing outbound — all on-device.
+    func canRepairMixedLanguage(_ item: LibraryItem) -> Bool {
+        item.speakers.count >= 1
+            && (item.language ?? "").split(separator: ",").count >= 2
+            && library.audioURL(for: item) != nil
+            && whisperURL != nil
+            && ffmpegURL != nil
+            && Tools.find("whisper-server") != nil
+            && isLLMReady
+    }
+
+    /// Second-pass repair: re-reads the audio behind transliterated foreign words and splices
+    /// the native spelling back in. Runs on demand (it's expensive), updates the transcript in
+    /// place, and leaves it untouched when nothing needed fixing. See `MixedLanguageRepair`.
+    func repairMixedLanguage(item: LibraryItem) {
+        guard !repairingItemIDs.contains(item.id) else { return }
+        let url = library.transcriptURL(for: item)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            alertMessage = "The transcript file is missing."
+            return
+        }
+        guard let audio = library.audioURL(for: item), FileManager.default.fileExists(atPath: audio.path) else {
+            alertMessage = "The original audio for this transcript isn't in the library, so it can't be re-read."
+            return
+        }
+        guard let ffmpeg = ffmpegURL, let serverBinary = Tools.find("whisper-server") else {
+            alertMessage = "The transcription tools are missing. Try reinstalling Transcriber."
+            return
+        }
+        repairingItemIDs.insert(item.id)
+        showToast("Repairing mixed-language spans in “\(item.title)”…")
+        Task {
+            defer { repairingItemIDs.remove(item.id) }
+            do {
+                let count = try await runMixedLanguageRepair(transcript: url, audio: audio, ffmpeg: ffmpeg, serverBinary: serverBinary)
+                library.refreshMetadata(item.id)
+                if count == 0 {
+                    showToast("No transliterated foreign words found — transcript left unchanged.")
+                } else {
+                    showToast("Repaired \(count) mixed-language \(count == 1 ? "span" : "spans") in “\(item.title)”.")
+                }
+            } catch {
+                alertMessage = "Mixed-language repair failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// The engine behind `repairMixedLanguage`. Returns how many spans were repaired (0 = the
+    /// transcript was already clean and was not rewritten). Kept off the main actor's hot path:
+    /// it does subprocess and model I/O only, mutating no `@MainActor` state directly.
+    private func runMixedLanguageRepair(transcript: URL, audio: URL, ffmpeg: URL, serverBinary: URL) async throws -> Int {
+        struct RepairError: LocalizedError { let message: String; var errorDescription: String? { message } }
+
+        let content = try String(contentsOf: transcript, encoding: .utf8)
+        let declared = MarkdownWriter.declaredLanguages(from: content)
+        let refs = TranscriptIndex.blocks(in: MarkdownWriter.transcriptBody(from: content))
+            .filter { $0.speaker != nil && $0.time != nil }
+        guard !refs.isEmpty else {
+            throw RepairError(message: "This transcript has no timestamped speaker turns to repair.")
+        }
+
+        // Convert the mixed audio once; every block/span is sliced out of this wav.
+        let wav = try await FFmpeg.convertToWav(input: audio, ffmpeg: ffmpeg) { [weak self] p in self?.currentProcess = p }
+        defer { try? FileManager.default.removeItem(at: wav) }
+        let totalDuration = await FFmpeg.duration(of: wav, ffprobe: ffprobeURL ?? ffmpeg) ?? 0
+
+        // Block time-ranges: each turn runs to the next turn's start (last one to the end).
+        var blocks: [TranscriptBlock] = []
+        for (i, ref) in refs.enumerated() {
+            let start = MixedLanguageRepair.seconds(fromLabel: ref.time ?? "") ?? 0
+            let nextStart = i + 1 < refs.count
+                ? (MixedLanguageRepair.seconds(fromLabel: refs[i + 1].time ?? "") ?? totalDuration)
+                : totalDuration
+            let end = max(start + 0.1, nextStart)
+            blocks.append(TranscriptBlock(speaker: ref.speaker ?? "Speaker 1", start: start, end: end, text: ref.text))
+        }
+
+        let whisperModel = modelManager.localURL(for: selectedModel)
+        try await WhisperServer.shared.ensureRunning(model: whisperModel, serverBinary: serverBinary)
+        try await LlamaServer.shared.ensureRunning(model: modelManager.localURL(for: selectedLLM))
+        let languageHint = declared.isEmpty ? "the languages spoken" : declared.joined(separator: ", ")
+
+        let result = try await MixedLanguageRepair.repair(
+            blocks: blocks,
+            findCandidates: { blocks in
+                try await Self.mixedLanguageCandidates(blocks: blocks, languages: languageHint)
+            },
+            wordsForBlock: { index in
+                let block = blocks[index]
+                let clipStart = max(0, block.start - 0.12)
+                let clip = try await FFmpeg.extract(from: wav, start: block.start, end: block.end, ffmpeg: ffmpeg)
+                defer { try? FileManager.default.removeItem(at: clip) }
+                let out = try await WhisperServer.shared.transcribeWords(wav: clip, language: nil)
+                // Word times are relative to the clip (which began at clipStart) — shift to absolute.
+                return out.words.map { WhisperServer.Word(text: $0.text, start: clipStart + $0.start, end: clipStart + $0.end) }
+            },
+            locateSpans: { words in
+                try await Self.locateTransliteratedSpans(words: words, languages: languageHint)
+            },
+            retranscribeSpan: { start, end, language in
+                let clip = try await FFmpeg.extract(from: wav, start: start, end: end, ffmpeg: ffmpeg)
+                defer { try? FileManager.default.removeItem(at: clip) }
+                let out = try await WhisperServer.shared.transcribe(wav: clip, language: language)
+                return out.text
+            }
+        )
+
+        guard result.repairedSpanCount > 0 else { return 0 }
+        let newBody = MarkdownWriter.diarizedBody(blocks: result.blocks)
+        try MixedLanguageRepair.rewriteBody(newBody, in: transcript)
+        return result.repairedSpanCount
+    }
+
+    /// LLM pass 1: which block indices likely contain transliterated foreign words. Cheap gate
+    /// so monolingual turns are never re-transcribed. JSON-constrained, so no freeform parsing.
+    nonisolated static func mixedLanguageCandidates(blocks: [TranscriptBlock], languages: String) async throws -> [Int] {
+        guard !blocks.isEmpty else { return [] }
+        // Handed the whole transcript at once, a small local model reasons over the flood of turns
+        // poorly and often returns nothing. Ask in windows so each prompt stays short; renumber
+        // each window from 0 and map the answer back to the global index with the window offset.
+        let windowSize = 40
+        let system = """
+        You inspect transcript turns from a conversation in \(languages). Some turns contain a \
+        foreign word written phonetically in the wrong script (transliteration) — for example a \
+        German word spelled out in Cyrillic. Return the indices of turns that plausibly contain \
+        such transliterated foreign words. Be inclusive; a later step verifies against the audio. \
+        Return only the JSON object.
+        """
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": ["blocks": ["type": "array", "items": ["type": "integer"]]],
+            "required": ["blocks"],
+            "additionalProperties": false,
+        ]
+        struct Reply: Decodable { let blocks: [Int] }
+        var found: Set<Int> = []
+        var start = 0
+        while start < blocks.count {
+            let end = min(start + windowSize, blocks.count)
+            let window = Array(blocks[start..<end])
+            let numbered = window.enumerated()
+                .map { "[\($0.offset)] \($0.element.text)" }
+                .joined(separator: "\n")
+            let json = try await LlamaServer.shared.completeJSON(system: system, user: numbered, schema: schema, maxTokens: 800)
+            if let data = json.data(using: .utf8), let reply = try? JSONDecoder().decode(Reply.self, from: data) {
+                for local in reply.blocks where local >= 0 && local < window.count {
+                    found.insert(start + local)
+                }
+            }
+            start = end
+        }
+        return found.sorted()
+    }
+
+    /// LLM pass 2: given one turn's numbered words, which contiguous word-index ranges are
+    /// transliterated foreign words, and what language should they have been. Returns index
+    /// ranges only — never replacement text — so the LLM can't invent words; the audio does.
+    nonisolated static func locateTransliteratedSpans(words: [WhisperServer.Word], languages: String) async throws -> [MixedLanguageRepair.Span] {
+        guard !words.isEmpty else { return [] }
+        let numbered = words.enumerated()
+            .map { "\($0.offset): \($0.element.text.trimmingCharacters(in: .whitespaces))" }
+            .joined(separator: "\n")
+        let system = """
+        These are the words of one transcript turn from a conversation in \(languages), each on \
+        its own line as "index: word". Whisper transcribed the whole turn in one language, so any \
+        word that was actually spoken in another language is written phonetically in the wrong \
+        script (transliteration). Identify contiguous runs of such transliterated foreign words. \
+        For each run return the first and last word index (inclusive) and the ISO-639-1 code of \
+        the language it should be — chosen from the languages above. Do not return correctly \
+        spelled words, filler, or names. If there are none, return an empty list. Return only the \
+        JSON object; never include replacement text.
+        """
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "spans": [
+                    "type": "array",
+                    "items": [
+                        "type": "object",
+                        "properties": [
+                            "from": ["type": "integer"],
+                            "to": ["type": "integer"],
+                            "language": ["type": "string"],
+                        ],
+                        "required": ["from", "to", "language"],
+                        "additionalProperties": false,
+                    ],
+                ],
+            ],
+            "required": ["spans"],
+            "additionalProperties": false,
+        ]
+        let json = try await LlamaServer.shared.completeJSON(system: system, user: numbered, schema: schema, maxTokens: 800)
+        struct Reply: Decodable {
+            struct S: Decodable { let from: Int; let to: Int; let language: String }
+            let spans: [S]
+        }
+        guard let data = json.data(using: .utf8), let reply = try? JSONDecoder().decode(Reply.self, from: data) else {
+            return []
+        }
+        return reply.spans.map { MixedLanguageRepair.Span(from: $0.from, to: $0.to, language: $0.language.lowercased()) }
     }
 
     func ask(item: LibraryItem, target: AskAssistant.Target) {
@@ -416,13 +624,12 @@ final class AppState: ObservableObject {
                 var job = TranscriptionJob(sourceURL: recording.url, diarize: diarizeRecordings)
                 job.recordingWarning = recording.warning
                 jobs.append(job)
-                if let warning = recording.warning {
-                    // A half-captured meeting is worth an interruption: the user needs to
-                    // know before they rely on the transcript.
-                    alertMessage = "Recording saved as \(recording.url.lastPathComponent), but the capture had a problem.\n\n\(warning)"
-                } else {
-                    showToast("Recording saved as \(recording.url.lastPathComponent).")
-                }
+                // Don't interrupt with a scary alert when the capture had a hiccup:
+                // non-technical users (e.g. the person being recorded) are alarmed by it,
+                // and the recording was still saved. The warning is preserved for
+                // diagnostics — it flows into the `recording_warning:` frontmatter and
+                // shows as a quiet indicator in the Library (LibraryView).
+                showToast("Recording saved as \(recording.url.lastPathComponent).")
                 start()
             } catch {
                 alertMessage = "Could not finish the recording: \(error.localizedDescription)"
@@ -810,17 +1017,6 @@ final class AppState: ObservableObject {
                 updateJob(id) { $0.durationSeconds = duration }
             }
 
-            let wav = try await FFmpeg.convertToWav(input: job.sourceURL, ffmpeg: ffmpeg) { [weak self] process in
-                self?.currentProcess = process
-            }
-            defer { try? FileManager.default.removeItem(at: wav) }
-
-            if isCancelRequested(id) {
-                updateJob(id) { $0.status = .cancelled }
-                return
-            }
-
-            updateJob(id) { $0.status = .transcribing(progress: nil) }
             let onProgress: (Double) -> Void = { [weak self] progress in
                 Task { @MainActor in
                     self?.updateJob(id) { $0.status = .transcribing(progress: progress) }
@@ -830,11 +1026,91 @@ final class AppState: ObservableObject {
                 self?.currentProcess = process
             }
 
+            // Deterministic attribution when the recorder kept isolated, healthy per-speaker
+            // tracks: transcribe each track (one voice) and merge on the shared timeline instead
+            // of guessing speakers by clustering the mix. Nil for imported/mixed files or a
+            // dead/silent track — those fall through to the diarization paths below.
+            let dualTracks = job.diarize ? Self.dualTrackURLs(for: job.sourceURL) : nil
+
             let outputURL: URL
-            if job.diarize,
-               multilingualMode,
-               languageCode == "auto",
-               let serverBinary = Tools.find("whisper-server") {
+            if let dualTracks,
+               await Self.tracksUsable(mic: dualTracks.mic, system: dualTracks.system, ffmpeg: ffmpeg, ffprobe: ffprobeURL) {
+                if isCancelRequested(id) {
+                    updateJob(id) { $0.status = .cancelled }
+                    return
+                }
+                updateJob(id) { $0.status = .transcribing(progress: 0) }
+                let useMultilingual = multilingualMode && languageCode == "auto"
+                let serverBinary = Tools.find("whisper-server")
+                let allowed = Languages.ordered(allowedLanguages)
+                let mixDuration = duration
+                let transcribeTrack: (URL, String, @escaping (Double) -> Void) async throws -> (blocks: [TranscriptBlock], languages: [String]) = { trackURL, speaker, trackProgress in
+                    let trackWav = try await FFmpeg.convertToWav(input: trackURL, ffmpeg: ffmpeg, register: registerProcess)
+                    defer { try? FileManager.default.removeItem(at: trackWav) }
+                    if useMultilingual, let serverBinary {
+                        let trackDuration = await FFmpeg.duration(of: trackWav, ffprobe: self.ffprobeURL ?? ffmpeg) ?? mixDuration ?? 0
+                        let whole = [SpeakerSegment(speaker: speaker, start: 0, end: max(trackDuration, 0.1))]
+                        let out = try await MultilingualTranscriber.transcribe(
+                            wav: trackWav, speakers: whole, model: modelURL, ffmpeg: ffmpeg,
+                            serverBinary: serverBinary, allowedLanguages: allowed,
+                            isCancelled: { [weak self] in self?.isCancelRequested(id) ?? true },
+                            onProgress: trackProgress
+                        )
+                        return (out.blocks, out.languages)
+                    }
+                    // Fixed language, or no whisper-server: transcribe the whole track as one
+                    // speaker. TranscriptMerger coalesces its segments into readable blocks.
+                    let transcription = try await Whisper.transcribeSegments(
+                        wav: trackWav, model: modelURL, language: languageCode, cli: whisper,
+                        vadModel: vadModel, initialPrompt: vocabulary, register: registerProcess,
+                        onProgress: trackProgress
+                    )
+                    let whole = [SpeakerSegment(speaker: speaker, start: 0, end: .greatestFiniteMagnitude)]
+                    let blocks = TranscriptMerger.merge(whisper: transcription.segments, speakers: whole)
+                    let langs = transcription.language.map { [MultilingualTranscriber.languageCode($0) ?? $0] } ?? []
+                    return (blocks, langs)
+                }
+                let output = try await DualTrackTranscriber.transcribe(
+                    micWav: dualTracks.mic,
+                    systemWav: dualTracks.system,
+                    onProgress: onProgress,
+                    transcribeTrack: transcribeTrack
+                )
+                if isCancelRequested(id) {
+                    updateJob(id) { $0.status = .cancelled }
+                    return
+                }
+                if output.blocks.isEmpty {
+                    throw CommandFailure(tool: "whisper", status: 0, stderrTail: "No speech detected in the file.")
+                }
+                outputURL = try MarkdownWriter.writeDiarized(
+                    blocks: output.blocks,
+                    source: job.sourceURL,
+                    duration: duration,
+                    modelID: model.id,
+                    language: output.languages.isEmpty
+                        ? (languageCode == "auto" ? "auto" : languageCode)
+                        : output.languages.joined(separator: ", "),
+                    directory: workDir,
+                    extraFrontmatter: captureWarning + "attribution: tracks\n"
+                )
+            } else {
+                let wav = try await FFmpeg.convertToWav(input: job.sourceURL, ffmpeg: ffmpeg) { [weak self] process in
+                    self?.currentProcess = process
+                }
+                defer { try? FileManager.default.removeItem(at: wav) }
+
+                if isCancelRequested(id) {
+                    updateJob(id) { $0.status = .cancelled }
+                    return
+                }
+
+                updateJob(id) { $0.status = .transcribing(progress: nil) }
+
+                if job.diarize,
+                   multilingualMode,
+                   languageCode == "auto",
+                   let serverBinary = Tools.find("whisper-server") {
                 // Multilingual path: diarize first, then transcribe chunk by chunk so
                 // each speaker turn gets its own language detection (EN → RU switches).
                 updateJob(id) { $0.status = .diarizing }
@@ -925,6 +1201,7 @@ final class AppState: ObservableObject {
                     directory: workDir,
                     extraFrontmatter: captureWarning
                 )
+                }
             }
             updateJob(id) { $0.status = .done(outputURL: outputURL) }
 
@@ -973,6 +1250,42 @@ final class AppState: ObservableObject {
         return ["mic", "system"]
             .map { base.appendingPathExtension("\($0).m4a") }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// The isolated per-speaker tracks, but only when BOTH exist — the pair needed for
+    /// deterministic two-party attribution. Nil for imported/mixed files or a half-kept pair.
+    nonisolated static func dualTrackURLs(for source: URL) -> (mic: URL, system: URL)? {
+        let base = source.deletingPathExtension()
+        let mic = base.appendingPathExtension("mic.m4a")
+        let system = base.appendingPathExtension("system.m4a")
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: mic.path), fm.fileExists(atPath: system.path) else { return nil }
+        return (mic, system)
+    }
+
+    /// Both tracks must carry real speech before we trust per-track attribution. A track that
+    /// exists but is (near-)silent — system audio the OS never granted, or a mic that died
+    /// mid-call — would make attribution a lie; in that case we return false and fall back to
+    /// clustering the mix, which at least won't invent a second speaker out of silence.
+    nonisolated static func tracksUsable(mic: URL, system: URL, ffmpeg: URL, ffprobe: URL?) async -> Bool {
+        async let micOK = trackHasSpeech(mic, ffmpeg: ffmpeg, ffprobe: ffprobe)
+        async let systemOK = trackHasSpeech(system, ffmpeg: ffmpeg, ffprobe: ffprobe)
+        let (m, s) = await (micOK, systemOK)
+        return m && s
+    }
+
+    nonisolated static func trackHasSpeech(
+        _ track: URL,
+        ffmpeg: URL,
+        ffprobe: URL?,
+        minSpeechSeconds: Double = 3
+    ) async -> Bool {
+        guard let ffprobe,
+              let duration = await FFmpeg.duration(of: track, ffprobe: ffprobe),
+              duration >= 1 else { return false }
+        let silences = await FFmpeg.silences(in: track, ffmpeg: ffmpeg)
+        let silent = silences.reduce(0) { $0 + max(0, $1.end - $1.start) }
+        return duration - silent >= minSpeechSeconds
     }
 
     /// Display name for a project id (nil == the Unsorted bucket).

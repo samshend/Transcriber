@@ -76,9 +76,35 @@ actor LlamaServer {
         maxTokens: Int = 1200,
         temperature: Double = 0.3
     ) async throws -> String {
+        try await chat(system: system, user: user, maxTokens: maxTokens, temperature: temperature, responseFormat: nil)
+    }
+
+    /// A completion constrained to emit JSON matching `schema` (llama.cpp's grammar-backed
+    /// `response_format: json_schema`). Returns the raw JSON string — the caller decodes it.
+    /// Temperature is pinned low: this is extraction, not prose, so determinism matters.
+    func completeJSON(
+        system: String,
+        user: String,
+        schema: [String: Any],
+        maxTokens: Int = 1200
+    ) async throws -> String {
+        let format: [String: Any] = [
+            "type": "json_schema",
+            "json_schema": ["name": "result", "strict": true, "schema": schema],
+        ]
+        return try await chat(system: system, user: user, maxTokens: maxTokens, temperature: 0.0, responseFormat: format)
+    }
+
+    private func chat(
+        system: String,
+        user: String,
+        maxTokens: Int,
+        temperature: Double,
+        responseFormat: [String: Any]?
+    ) async throws -> String {
         guard isRunning else { throw ServerFailure(message: "not running") }
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "messages": [
                 ["role": "system", "content": system],
                 ["role": "user", "content": user],
@@ -90,6 +116,9 @@ actor LlamaServer {
             // summaries should be the answer only.
             "chat_template_kwargs": ["enable_thinking": false],
         ]
+        if let responseFormat {
+            body["response_format"] = responseFormat
+        }
 
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
         request.httpMethod = "POST"
