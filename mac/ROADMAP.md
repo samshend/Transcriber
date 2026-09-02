@@ -113,8 +113,18 @@ Free trial (e.g. N minutes or a few files) → one-time unlock. Price anchor: Ma
 
 ## 5. App Store / distribution readiness (the real work before selling)
 
-- **Signing & notarization:** need an Apple Developer ID; notarize the app; add an updater (Sparkle) if selling direct, or go via the Mac App Store.
-- **Sandboxing (MAS requirement):** the current design shells out to Homebrew binaries (ffmpeg, whisper-cli, whisper-server) and uses a Core Audio process tap. For the sandbox we must **bundle** the binaries/libraries inside the app and confirm the audio-tap entitlement works sandboxed. This is the biggest technical lift. (Direct/notarized-outside-MAS distribution avoids the sandbox but still needs bundled binaries so users don't need Homebrew.)
+_Status update 2026-09-02: signing, notarization and TestFlight are **done**; the remaining
+blockers for a *public* paid release are LGPL ffmpeg and the App Sandbox._
+
+- **Signing & notarization:** ✅ done. Apple Developer Program active (Team `AUHHAT2Z56`), app
+  signed + notarized (`Scripts/notarize.sh`) and uploaded to **TestFlight** (build 2) via the
+  XcodeGen project. See DISTRIBUTION.md and the `transcriber-testflight` skill. Still to decide
+  for direct sale: an updater (Sparkle) vs. staying Mac App Store–only.
+- **Sandboxing (MAS requirement):** ❌ not yet — the biggest remaining technical lift. The
+  binaries are already **bundled** (no Homebrew needed on the target Mac), but the Core Audio
+  process tap must be re-validated under `com.apple.security.app-sandbox` with the audio-input
+  and user-selected-file entitlements. (TestFlight/direct-notarized distribution avoids the
+  sandbox; the public Mac App Store does not.)
 - **ffmpeg licensing:** Homebrew's ffmpeg is GPL-enabled. Ship an **LGPL-only** ffmpeg build (no `--enable-gpl`); we only use audio paths, so nothing is lost. whisper.cpp (MIT), FluidAudio (Apache-2.0), Whisper weights (MIT) are all commercial-friendly.
 - **Model download UX:** first-run downloads the whisper model (~574 MB) and diarization models. Needs clear progress, resumability, and a graceful offline/failed state.
 - **Recording-consent notice:** in-app reminder; consent law varies by jurisdiction.

@@ -3,11 +3,16 @@
 How to get the app onto someone else's Mac — today (direct hand-off) and eventually
 (TestFlight / App Store). Read the ffmpeg section before you ship anything publicly.
 
-## Current state
+## Current state (updated 2026-09-02)
 
-- **Signing:** ad-hoc only (`codesign --sign -`). No Apple Developer ID on this machine
-  (`security find-identity -v -p codesigning` → none). An ad-hoc app is **rejected by
-  Gatekeeper** on any other Mac (`spctl -a` → rejected).
+- **Signing:** ✅ full Apple Developer ID. The Apple Developer Program is active (Team
+  `AUHHAT2Z56`); an *Apple Distribution* cert signs the App Store build and a *Developer ID
+  Application* cert signs the direct/notarized build. `Scripts/notarize.sh` automates the
+  direct-distribution sign→notarize→staple flow.
+- **TestFlight:** ✅ the app is uploaded to App Store Connect and distributing via **TestFlight**.
+  Builds 1 and 2 are up (next is 3). This uses the **XcodeGen project** — not SwiftPM — because
+  archiving to App Store Connect needs an embeddable provisioning profile that SwiftPM can't
+  produce. See the `transcriber-testflight` skill for the exact bump→archive→export→upload chain.
 - **Self-contained:** yes, as of `Scripts/bundle-tools.sh`. ffmpeg, ffprobe and whisper-cli
   plus their entire dylib closure are copied into `Transcriber.app/Contents/Resources/{bin,lib}`
   and every load path is rewritten off Homebrew. Verified: the bundled binaries transcribe in
@@ -15,13 +20,21 @@ How to get the app onto someone else's Mac — today (direct hand-off) and event
 - **Models:** downloaded on first run into Application Support (not bundled) — keeps the app
   small and is fine for both distribution paths.
 
+> **Two build systems, on purpose.** SwiftPM (`Package.swift`) stays the source of truth for
+> local dev, the CLI and the `--selftest-*` harnesses. The XcodeGen project (`project.yml` →
+> `Transcriber.xcodeproj`) exists only to archive/sign for App Store Connect. Keep the build
+> number in sync between `Support/Info.plist` (`CFBundleVersion`) and `project.yml`
+> (`CURRENT_PROJECT_VERSION`) — both must be bumped for every upload.
+
 ## 🔴 ffmpeg is the blocker for the App Store
 
 Homebrew's ffmpeg is a **GPL** build — it links `x264` and `x265`, both GPL. Two consequences:
 
 1. **The App Store forbids GPL software** (the App Store Terms are incompatible with the GPL's
-   restrictions). A bundle containing this ffmpeg **will be rejected**, and even for direct
-   distribution the GPL obliges you to offer the corresponding source.
+   restrictions). Note the timing: **TestFlight upload does *not* license-check**, so the GPL
+   build is currently live in the pilot — but a public App Store release / App Review and a paid
+   release **will be rejected** on it, and even for direct distribution the GPL obliges you to
+   offer the corresponding source. Treat the pilot as borrowed time on this.
 2. **The fix:** build a minimal **LGPL** ffmpeg — drop `--enable-gpl` and the GPL-only encoders
    (x264/x265/etc.), which we don't need. We only *decode* (mp3/opus/aac/pcm + mov/mp4/mkv/ogg
    demuxers) and resample to 16 kHz mono WAV. A configure roughly like:
@@ -96,19 +109,24 @@ setup, then it's a single command — automated in `Scripts/notarize.sh`:
 
 ## Path B — TestFlight / App Store
 
-Needs things only you can set up:
+Status: **TestFlight reached** (builds 1–2 uploaded). App Store (public, paid) still gated on
+ffmpeg + sandbox.
 
-1. **Apple Developer Program** — $99/year. Gives the Developer ID + App Store Connect.
-2. **LGPL ffmpeg** — see above. Non-negotiable for the Store.
-3. **App sandbox** — the Store requires it. The app shells out to bundled binaries, records
-   the mic, captures system audio via a Core Audio process tap, and reads/writes user-chosen
-   folders. Each needs the right entitlement (`com.apple.security.app-sandbox`, audio-input,
-   user-selected-file read/write) and the process-tap approach must be re-validated under the
-   sandbox — this is the biggest unknown and should be spiked early.
-4. **App Store Connect record** — bundle ID, screenshots, privacy nutrition labels (easy here:
-   "no data collected — everything stays on device").
-5. **Upload** a signed, notarized build (Xcode Organizer or `xcrun altool`/`notarytool`), then
-   invite testers to TestFlight.
+1. **Apple Developer Program** — ✅ active (Team `AUHHAT2Z56`). Gives the Developer ID + App
+   Store Connect.
+2. **App Store Connect record** — ✅ created (bundle ID `com.samshend.transcriber`, privacy
+   label "Data Not Collected"). Still needed for public listing: screenshots, description.
+3. **Upload** — ✅ working. The chain is bump build number → `xcodebuild archive` →
+   `xcodebuild -exportArchive` (method `app-store-connect`, `Support/ExportOptions.plist`) →
+   `xcrun altool --upload-app`. Fully documented in the `transcriber-testflight` skill. Invite
+   testers from the TestFlight tab (done outside this repo).
+4. **LGPL ffmpeg** — ❌ still GPL. Tolerated by TestFlight, **non-negotiable for the public
+   Store**. See above.
+5. **App sandbox** — ❌ not yet. The Store requires it. The app shells out to bundled binaries,
+   records the mic, captures system audio via a Core Audio process tap, and reads/writes
+   user-chosen folders. Each needs the right entitlement (`com.apple.security.app-sandbox`,
+   audio-input, user-selected-file read/write) and the process-tap approach must be re-validated
+   under the sandbox — this is the biggest unknown and should be spiked before a public release.
 
 ## Troubleshooting: "ffmpeg … moov atom not found" on a recording
 

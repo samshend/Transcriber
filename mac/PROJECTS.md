@@ -1,5 +1,12 @@
 # Projects & local library
 
+> **Status: ✅ implemented and shipped.** This started as a design spec; the feature is now live
+> — `LibraryStore` (`Sources/Transcriber/Library.swift`) is wired into `AppState`, the sidebar
+> UI is in `LibraryView.swift`, and the MCP read path reads `library.json` directly. Read the
+> rest as the design record, not a to-do. (One leftover: the old `OutputMode` enum still exists
+> in `AppState.swift` as dead code and could be removed.) The "FORMAT contract" referenced below
+> is not yet written as `FORMAT.md`; the format lives in `MarkdownWriter.swift`.
+
 Reshapes storage from "files scattered next to their sources" into a **managed library the app
 owns**, organised into **projects** (like ChatGPT/Claude Desktop projects). Confirmed decisions:
 

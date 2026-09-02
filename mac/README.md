@@ -3,8 +3,8 @@
 **Private, offline transcription for the Mac.** Turn voice messages, videos, and live meetings into clean, speaker-attributed Markdown transcripts — without a single byte of audio leaving the machine.
 
 - **Platform:** native macOS app (SwiftUI), Apple Silicon–optimized (Metal GPU + Neural Engine)
-- **Status:** working v1, personal/local build
-- **Repo:** `~/workspace/Transcriber` · installed at `/Applications/Transcriber.app`
+- **Status:** working v1 — **notarized and in TestFlight pilot** (build 2, App Store Connect via the XcodeGen project). Not yet on the public App Store — see the ffmpeg licensing gap below.
+- **Repo:** `~/workspace/Transcriber` · local dev install at `/Applications/Transcriber.app`
 
 ---
 
@@ -42,7 +42,7 @@ through a resident local whisper-server (model loaded once) with per-chunk langu
 Recording: AVAudioEngine (mic) + Core Audio process tap (system audio) → ffmpeg amix.
 ```
 
-- **App:** Swift Package, SwiftUI, no Xcode project needed. `Scripts/build-app.sh [--install]` produces the `.app`.
+- **App:** Swift Package, SwiftUI. Day-to-day dev needs no Xcode project (`Scripts/build-app.sh [--install]` produces the `.app`). For App Store / TestFlight archiving there is an **XcodeGen project** (`project.yml` → `Transcriber.xcodeproj`), since SwiftPM can't embed a provisioning profile — see [DISTRIBUTION.md](DISTRIBUTION.md).
 - **Engines:** [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT), ffmpeg, [FluidAudio](https://github.com/FluidInference/FluidAudio) (Apache-2.0) for diarization.
 - **Runs on:** macOS 14.2+, best on Apple Silicon. Whisper large-v3-turbo runs ~8–15× realtime on M-series.
 
@@ -62,8 +62,8 @@ Recording: AVAudioEngine (mic) + Core Audio process tap (system audio) → ffmpe
 
 ### Gaps to close before selling (*)
 
-- **Distribution:** currently ad-hoc signed; needs an Apple Developer ID, notarization, and an update mechanism (e.g. Sparkle). Mac App Store would additionally require sandboxing — the system-audio tap and Homebrew-binary approach need rework for that (bundle ffmpeg/whisper libraries instead of calling brew binaries).
-- **Licensing:** whisper.cpp (MIT), FluidAudio (Apache-2.0) and Whisper model weights (MIT) are commercial-friendly. **ffmpeg needs attention:** the Homebrew build includes GPL components — for a shipped product, bundle an LGPL-only ffmpeg build or link it dynamically and comply accordingly.
+- **Distribution:** ✅ mostly done — the app is signed with an Apple Developer ID, notarized (`Scripts/notarize.sh`), and uploaded to **TestFlight** (build 2) through the XcodeGen project. The bundled binaries are self-contained (no Homebrew on the target Mac). Still open for a *public* release: the ffmpeg licensing gap below, App Sandbox for the Mac App Store (the system-audio tap must be re-validated sandboxed), and an update mechanism (Sparkle) if selling direct.
+- **Licensing (the remaining public-release blocker):** whisper.cpp (MIT), FluidAudio (Apache-2.0) and Whisper model weights (MIT) are commercial-friendly. **ffmpeg is the blocker:** the bundled Homebrew build includes GPL components. TestFlight upload accepts it (no license check at upload), but the public App Store and a paid release require an **LGPL-only ffmpeg** build — see [DISTRIBUTION.md](DISTRIBUTION.md).
 - **Polish:** app icon, onboarding (permissions walkthrough), crash reporting, localization (RU/DE/ES are natural first targets given the mixed-language angle).
 - **Recording consent:** ship an in-app reminder; recording-consent law varies by jurisdiction.
 
