@@ -170,7 +170,7 @@ struct TranscriptListColumn: View {
             }
             if !app.jobs.isEmpty {
                 Section("Processing") {
-                    ForEach(app.jobs) { job in ProcessingRow(job: job) }
+                    ForEach(app.jobs) { job in ProcessingRow(job: job).tag(job.id) }
                 }
             }
             if items.isEmpty && app.jobs.isEmpty {
@@ -282,7 +282,9 @@ struct TranscriptDetailColumn: View {
 
     var body: some View {
         Group {
-            if let item = app.selectedItem {
+            if let job = app.jobs.first(where: { $0.id == app.selectedItemID }) {
+                JobProgressView(job: job)
+            } else if let item = app.selectedItem {
                 content(for: item)
             } else {
                 placeholder
@@ -521,81 +523,63 @@ struct ItemMenu: View {
     }
 }
 
+// MARK: - Pipeline stage bookkeeping (shared by the row and the progress detail view)
+
+/// Which named stages a job passes through, in real execution order, and which one is active.
+/// Order matters because it differs by path: the multilingual/auto-language path diarizes
+/// *before* transcribing (so each speaker turn gets its own language detection), while the
+/// fixed-language diarize path transcribes first and clusters speakers afterward. Getting this
+/// right is what makes "step 2 of 3" honest instead of a guess.
+private enum JobStages {
+    static func labels(diarize: Bool, diarizeFirst: Bool) -> [String] {
+        guard diarize else { return ["Prepare", "Transcribe"] }
+        return diarizeFirst ? ["Prepare", "Speakers", "Transcribe"] : ["Prepare", "Transcribe", "Speakers"]
+    }
+
+    static func currentIndex(status: JobStatus, in labels: [String]) -> Int? {
+        let label: String?
+        switch status {
+        case .converting: label = "Prepare"
+        case .transcribing: label = "Transcribe"
+        case .diarizing: label = "Speakers"
+        default: label = nil
+        }
+        return label.flatMap { labels.firstIndex(of: $0) }
+    }
+}
+
 // MARK: - Processing row (transient jobs)
 
+/// Deliberately minimal: a title and one bar. The full step-by-step breakdown lives in the
+/// detail panel (`JobProgressView`), which opens automatically when a job starts — this row's
+/// only job is to stay legible and not visibly break down when the sidebar column is narrow.
 private struct ProcessingRow: View {
     @EnvironmentObject private var app: AppState
     let job: TranscriptionJob
 
     private var isStopping: Bool { app.stoppingJobIDs.contains(job.id) }
 
+    private var barLabel: String {
+        if isStopping { return "Stopping…" }
+        if let fraction = job.status.fraction { return "\(Int(fraction * 100))%" }
+        return job.status.caption
+    }
+
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: job.isVideo ? "film" : "waveform").foregroundStyle(.secondary).frame(width: 20)
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: job.isVideo ? "film" : "waveform").foregroundStyle(.secondary).frame(width: 20).padding(.top, 2)
+            VStack(alignment: .leading, spacing: 6) {
                 Text(job.sourceURL.lastPathComponent).lineLimit(1).truncationMode(.middle)
                 if job.status.isRunning {
-                    progress
+                    ProcessBar(fraction: job.status.fraction, label: barLabel)
                 } else {
                     status
                 }
             }
             Spacer()
-            trailingControl
+            trailingControl.padding(.top, 2)
         }
-        .padding(.vertical, 3)
-    }
-
-    // MARK: Running — unified bar + stage rail
-
-    @ViewBuilder
-    private var progress: some View {
-        // Determinate while whisper reports a percentage; indeterminate for audio
-        // conversion and speaker detection, which have no measurable progress.
-        if let fraction = job.status.fraction {
-            ProgressView(value: fraction)
-        } else {
-            ProgressView().progressViewStyle(.linear)
-        }
-        HStack(spacing: 8) {
-            Text(isStopping ? "Stopping…" : job.status.caption)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            stageRail
-            Spacer(minLength: 0)
-            if let fraction = job.status.fraction {
-                Text("\(Int(fraction * 100))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    /// The pipeline steps, with the active one highlighted. Only the current stage is
-    /// emphasized (not "everything up to here"), so it reads correctly whether speakers
-    /// are detected before transcription (multilingual path) or after it.
-    private var stageRail: some View {
-        HStack(spacing: 6) {
-            ForEach(stageLabels, id: \.self) { label in
-                Text(label)
-                    .font(.caption2)
-                    .fontWeight(label == currentStageLabel ? .semibold : .regular)
-                    .foregroundStyle(label == currentStageLabel ? Color.accentColor : Color.secondary)
-            }
-        }
-    }
-
-    private var stageLabels: [String] {
-        job.diarize ? ["Prepare", "Transcribe", "Speakers"] : ["Prepare", "Transcribe"]
-    }
-
-    private var currentStageLabel: String? {
-        switch job.status {
-        case .converting: return "Prepare"
-        case .transcribing: return "Transcribe"
-        case .diarizing: return "Speakers"
-        default: return nil
-        }
+        .padding(.vertical, 6)
     }
 
     // MARK: Not running — plain status text
@@ -626,6 +610,248 @@ private struct ProcessingRow: View {
             }
             .buttonStyle(.borderless)
         }
+    }
+}
+
+/// A compact capsule bar with its own label drawn on top — determinate (whisper's percentage)
+/// or an animated indeterminate sweep for the stages that have no measurable progress.
+private struct ProcessBar: View {
+    let fraction: Double?
+    let label: String
+
+    @State private var sweep = false
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.secondary.opacity(0.2))
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: fillWidth(in: geo.size.width))
+                    .offset(x: fraction == nil && sweep ? geo.size.width * 0.6 : 0)
+                Text(label)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(height: 18)
+        .clipShape(Capsule())
+        .animation(.easeInOut(duration: 0.2), value: fraction)
+        .onAppear {
+            guard fraction == nil else { return }
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                sweep = true
+            }
+        }
+    }
+
+    private func fillWidth(in totalWidth: CGFloat) -> CGFloat {
+        if let fraction { return max(30, totalWidth * CGFloat(fraction)) }
+        return totalWidth * 0.35
+    }
+}
+
+// MARK: - Job progress (detail column while a transcript is still processing)
+
+private struct JobProgressView: View {
+    @EnvironmentObject private var app: AppState
+    let job: TranscriptionJob
+
+    private enum StepState { case done, active, pending }
+
+    private var isStopping: Bool { app.stoppingJobIDs.contains(job.id) }
+    private var diarizeFirst: Bool { app.multilingualMode && app.language == "auto" }
+    private var stageLabels: [String] { JobStages.labels(diarize: job.diarize, diarizeFirst: diarizeFirst) }
+    private var currentIndex: Int? { JobStages.currentIndex(status: job.status, in: stageLabels) }
+
+    /// The step's plain label expanded into something a non-technical reader can follow.
+    private func title(for label: String) -> String {
+        switch label {
+        case "Prepare": return "Preparing audio"
+        case "Transcribe": return "Transcribing speech"
+        case "Speakers": return "Detecting speakers"
+        default: return label
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    stepList
+                    trailingBanner
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .animation(.easeInOut(duration: 0.35), value: currentIndex)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(job.sourceURL.deletingPathExtension().lastPathComponent)
+                .font(.title2).fontWeight(.semibold)
+                .lineLimit(2).textSelection(.enabled)
+            HStack(spacing: 10) {
+                Label(job.isVideo ? "Video" : "Audio", systemImage: job.isVideo ? "film" : "waveform")
+                if let d = job.durationSeconds {
+                    Label(MarkdownWriter.formatDuration(d), systemImage: "clock")
+                }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding()
+    }
+
+    private var stepList: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ForEach(Array(stageLabels.enumerated()), id: \.offset) { index, label in
+                stepRow(index: index, label: label)
+            }
+        }
+    }
+
+    private func state(for index: Int) -> StepState {
+        guard let currentIndex else { return .pending }
+        if index < currentIndex { return .done }
+        if index == currentIndex { return .active }
+        return .pending
+    }
+
+    private func stepRow(index: Int, label: String) -> some View {
+        let state = state(for: index)
+        return HStack(alignment: .top, spacing: 12) {
+            stepIcon(state)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title(for: label))
+                    .font(.body)
+                    .fontWeight(state == .active ? .semibold : .regular)
+                    .foregroundStyle(state == .pending ? .secondary : .primary)
+                if state == .active {
+                    activeStepDetail
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func stepIcon(_ state: StepState) -> some View {
+        ZStack {
+            switch state {
+            case .done:
+                Circle().fill(Color.accentColor)
+                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+            case .active:
+                PulsingDot()
+            case .pending:
+                Circle().strokeBorder(Color.secondary.opacity(0.35), lineWidth: 1.5)
+            }
+        }
+        .frame(width: 22, height: 22)
+        .transition(.scale.combined(with: .opacity))
+    }
+
+    @ViewBuilder
+    private var activeStepDetail: some View {
+        if isStopping {
+            Text("Stopping…").font(.caption).foregroundStyle(.secondary)
+        } else if let fraction = job.status.fraction {
+            VStack(alignment: .leading, spacing: 6) {
+                ProgressView(value: fraction).frame(maxWidth: 260)
+                Text("\(Int(fraction * 100))%")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.primary)
+                    .animation(.easeInOut(duration: 0.2), value: fraction)
+            }
+        } else {
+            ProgressView().progressViewStyle(.linear).frame(maxWidth: 260)
+        }
+    }
+
+    @ViewBuilder
+    private var trailingBanner: some View {
+        switch job.status {
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.red)
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        case .cancelled:
+            Label("Stopped before finishing", systemImage: "stop.circle")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        default:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("TRANSCRIPT")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .tracking(0.5)
+                SkeletonLines()
+            }
+        }
+    }
+}
+
+/// A small pulsing dot marking the currently-active step.
+private struct PulsingDot: View {
+    @State private var pulsing = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color.accentColor.opacity(0.3))
+                .scaleEffect(pulsing ? 1.8 : 1.0)
+                .opacity(pulsing ? 0 : 1)
+            Circle()
+                .fill(Color.accentColor)
+                .frame(width: 9, height: 9)
+        }
+        .onAppear {
+            withAnimation(.easeOut(duration: 1.2).repeatForever(autoreverses: false)) {
+                pulsing = true
+            }
+        }
+    }
+}
+
+/// Shimmering placeholder lines standing in for the transcript that's on its way — a visible
+/// promise that content is coming, not just a spinner with nothing to anchor it to.
+private struct SkeletonLines: View {
+    @State private var shimmer = false
+    private let widths: [CGFloat] = [0.92, 1.0, 0.68, 0.85, 0.55, 0.9, 0.74]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(widths.enumerated()), id: \.offset) { _, width in
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(shimmerGradient)
+                    .frame(height: 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .scaleEffect(x: width, y: 1, anchor: .leading)
+            }
+        }
+        .onAppear {
+            withAnimation(.linear(duration: 1.3).repeatForever(autoreverses: false)) {
+                shimmer.toggle()
+            }
+        }
+    }
+
+    private var shimmerGradient: LinearGradient {
+        LinearGradient(
+            colors: [Color.secondary.opacity(0.1), Color.secondary.opacity(0.22), Color.secondary.opacity(0.1)],
+            startPoint: shimmer ? .leading : .trailing,
+            endPoint: shimmer ? .trailing : .leading
+        )
     }
 }
 

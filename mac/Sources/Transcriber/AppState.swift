@@ -54,6 +54,10 @@ final class AppState: ObservableObject {
     @Published var suggestRecording: Bool { didSet { defaults.set(suggestRecording, forKey: "suggestRecording") } }
     @Published var allowedLanguages: Set<String> { didSet { defaults.set(Array(allowedLanguages), forKey: "allowedLanguages") } }
     @Published var recordingsFolderPath: String { didSet { defaults.set(recordingsFolderPath, forKey: "recordingsFolderPath") } }
+    /// Optional user-chosen ffmpeg binary — the "plugin" path for formats AVFoundation can't
+    /// read (ogg/opus, mkv/webm/avi, wma, amr...). Checked ahead of the Homebrew/system
+    /// auto-detection in `refreshTools()`. Empty means "auto-detect only".
+    @Published var customFFmpegPath: String { didSet { defaults.set(customFFmpegPath, forKey: "customFFmpegPath") } }
 
     @Published var ffmpegURL: URL?
     @Published var ffprobeURL: URL?
@@ -91,6 +95,9 @@ final class AppState: ObservableObject {
     private var meetingGraceTask: Task<Void, Never>?
     private static let meetingGrace: TimeInterval = 600   // 10 minutes before auto-stopping
     private var currentProcess: Process?
+    /// The in-flight AVFoundation decode, if any — the AVAssetReader analog of `currentProcess`,
+    /// so cancelling a job also cancels a decode that never spawned a subprocess.
+    private var currentReader: AVAssetReader?
     private var stopRequested = false
     /// IDs the user stopped individually (vs. `stopRequested`, which halts the whole queue).
     private var cancelledJobIDs: Set<UUID> = []
@@ -110,7 +117,10 @@ final class AppState: ObservableObject {
         captureSystemAudio = defaults.object(forKey: "captureSystemAudio") as? Bool ?? true
         keepSourceTracks = defaults.object(forKey: "keepSourceTracks") as? Bool ?? true
         diarizeRecordings = defaults.object(forKey: "diarizeRecordings") as? Bool ?? true
-        diarizeImported = defaults.bool(forKey: "diarizeImported")
+        // On by default, matching diarizeRecordings — the whole point of the app is
+        // speaker-attributed, timestamped transcripts, and imported voice messages/meetings
+        // want that just as much as live recordings do.
+        diarizeImported = defaults.object(forKey: "diarizeImported") as? Bool ?? true
         multilingualMode = defaults.object(forKey: "multilingualMode") as? Bool ?? true
         autoSummarize = defaults.bool(forKey: "autoSummarize")
         summaryEngine = SummaryEngine(rawValue: defaults.string(forKey: "summaryEngine") ?? "") ?? .automatic
@@ -126,6 +136,7 @@ final class AppState: ObservableObject {
         suggestRecording = defaults.object(forKey: "suggestRecording") as? Bool ?? true
         allowedLanguages = Set(defaults.stringArray(forKey: "allowedLanguages") ?? [])
         recordingsFolderPath = defaults.string(forKey: "recordingsFolderPath") ?? ""
+        customFFmpegPath = defaults.string(forKey: "customFFmpegPath") ?? ""
         refreshTools()
 
         // The job list is now only the transient processing queue; finished transcripts live
@@ -213,7 +224,6 @@ final class AppState: ObservableObject {
             && (item.language ?? "").split(separator: ",").count >= 2
             && library.audioURL(for: item) != nil
             && whisperURL != nil
-            && ffmpegURL != nil
             && Tools.find("whisper-server") != nil
             && isLLMReady
     }
@@ -232,7 +242,7 @@ final class AppState: ObservableObject {
             alertMessage = "The original audio for this transcript isn't in the library, so it can't be re-read."
             return
         }
-        guard let ffmpeg = ffmpegURL, let serverBinary = Tools.find("whisper-server") else {
+        guard let serverBinary = Tools.find("whisper-server") else {
             alertMessage = "The transcription tools are missing. Try reinstalling Transcriber."
             return
         }
@@ -241,7 +251,7 @@ final class AppState: ObservableObject {
         Task {
             defer { repairingItemIDs.remove(item.id) }
             do {
-                let count = try await runMixedLanguageRepair(transcript: url, audio: audio, ffmpeg: ffmpeg, serverBinary: serverBinary)
+                let count = try await runMixedLanguageRepair(transcript: url, audio: audio, serverBinary: serverBinary)
                 library.refreshMetadata(item.id)
                 if count == 0 {
                     showToast("No transliterated foreign words found — transcript left unchanged.")
@@ -257,7 +267,7 @@ final class AppState: ObservableObject {
     /// The engine behind `repairMixedLanguage`. Returns how many spans were repaired (0 = the
     /// transcript was already clean and was not rewritten). Kept off the main actor's hot path:
     /// it does subprocess and model I/O only, mutating no `@MainActor` state directly.
-    private func runMixedLanguageRepair(transcript: URL, audio: URL, ffmpeg: URL, serverBinary: URL) async throws -> Int {
+    private func runMixedLanguageRepair(transcript: URL, audio: URL, serverBinary: URL) async throws -> Int {
         struct RepairError: LocalizedError { let message: String; var errorDescription: String? { message } }
 
         let content = try String(contentsOf: transcript, encoding: .utf8)
@@ -268,10 +278,16 @@ final class AppState: ObservableObject {
             throw RepairError(message: "This transcript has no timestamped speaker turns to repair.")
         }
 
-        // Convert the mixed audio once; every block/span is sliced out of this wav.
-        let wav = try await FFmpeg.convertToWav(input: audio, ffmpeg: ffmpeg) { [weak self] p in self?.currentProcess = p }
+        // Convert the mixed audio once; every block/span is sliced out of this wav. Library
+        // audio is always a format the app itself produced (m4a/wav), so this never needs ffmpeg.
+        let wav = try await MediaDecoder.convertToWav(
+            input: audio,
+            ffmpeg: ffmpegURL,
+            registerReader: { [weak self] reader in self?.currentReader = reader },
+            registerProcess: { [weak self] p in self?.currentProcess = p }
+        )
         defer { try? FileManager.default.removeItem(at: wav) }
-        let totalDuration = await FFmpeg.duration(of: wav, ffprobe: ffprobeURL ?? ffmpeg) ?? 0
+        let totalDuration = await MediaDecoder.duration(of: wav) ?? 0
 
         // Block time-ranges: each turn runs to the next turn's start (last one to the end).
         var blocks: [TranscriptBlock] = []
@@ -297,7 +313,7 @@ final class AppState: ObservableObject {
             wordsForBlock: { index in
                 let block = blocks[index]
                 let clipStart = max(0, block.start - 0.12)
-                let clip = try await FFmpeg.extract(from: wav, start: block.start, end: block.end, ffmpeg: ffmpeg)
+                let clip = try await PCMAnalysis.extract(from: wav, start: block.start, end: block.end)
                 defer { try? FileManager.default.removeItem(at: clip) }
                 let out = try await WhisperServer.shared.transcribeWords(wav: clip, language: nil)
                 // Word times are relative to the clip (which began at clipStart) — shift to absolute.
@@ -307,7 +323,7 @@ final class AppState: ObservableObject {
                 try await Self.locateTransliteratedSpans(words: words, languages: languageHint)
             },
             retranscribeSpan: { start, end, language in
-                let clip = try await FFmpeg.extract(from: wav, start: start, end: end, ffmpeg: ffmpeg)
+                let clip = try await PCMAnalysis.extract(from: wav, start: start, end: end)
                 defer { try? FileManager.default.removeItem(at: clip) }
                 let out = try await WhisperServer.shared.transcribe(wav: clip, language: language)
                 return out.text
@@ -550,8 +566,10 @@ final class AppState: ObservableObject {
     var selectedModel: WhisperModel { WhisperModel.byID(modelID) }
 
     var missingTools: [String] {
+        // ffmpeg is optional — an AVFoundation-only decode covers the common formats. Its
+        // absence only limits which exotic containers (ogg/opus, mkv/webm...) can be imported,
+        // surfaced per-file when one is actually dropped in, not as a startup blocker.
         var missing: [String] = []
-        if ffmpegURL == nil { missing.append("ffmpeg") }
         if whisperURL == nil { missing.append("whisper-cli") }
         return missing
     }
@@ -562,9 +580,18 @@ final class AppState: ObservableObject {
     var hasFinishedJobs: Bool { jobs.contains { $0.status.isFinished } }
 
     func refreshTools() {
-        ffmpegURL = Tools.find("ffmpeg")
+        ffmpegURL = resolvedFFmpegURL()
         ffprobeURL = Tools.find("ffprobe")
         whisperURL = Tools.find("whisper-cli", "whisper-cpp")
+    }
+
+    /// A user-chosen path (Settings → Tools) wins over auto-detection, since pointing at one
+    /// explicitly is a deliberate override.
+    private func resolvedFFmpegURL() -> URL? {
+        if !customFFmpegPath.isEmpty, FileManager.default.isExecutableFile(atPath: customFFmpegPath) {
+            return URL(fileURLWithPath: customFFmpegPath)
+        }
+        return Tools.find("ffmpeg")
     }
 
     // MARK: - Queue management
@@ -594,7 +621,11 @@ final class AppState: ObservableObject {
         let newFiles = files
             .filter { !knownPaths.contains($0.path) }
             .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-        jobs.append(contentsOf: newFiles.map { TranscriptionJob(sourceURL: $0, diarize: diarizeImported) })
+        let newJobs = newFiles.map { TranscriptionJob(sourceURL: $0, diarize: diarizeImported) }
+        jobs.append(contentsOf: newJobs)
+        // Open the progress panel on the new job right away, so the user sees it working
+        // instead of having to go find and click the row themselves.
+        if let first = newJobs.first { selectedItemID = first.id }
         start()
     }
 
@@ -624,6 +655,7 @@ final class AppState: ObservableObject {
                 var job = TranscriptionJob(sourceURL: recording.url, diarize: diarizeRecordings)
                 job.recordingWarning = recording.warning
                 jobs.append(job)
+                selectedItemID = job.id
                 // Don't interrupt with a scary alert when the capture had a hiccup:
                 // non-technical users (e.g. the person being recorded) are alarmed by it,
                 // and the recording was still saved. The warning is preserved for
@@ -905,6 +937,7 @@ final class AppState: ObservableObject {
     func remove(_ job: TranscriptionJob) {
         guard !job.status.isRunning else { return }
         jobs.removeAll { $0.id == job.id }
+        if selectedItemID == job.id { selectedItemID = nil }
     }
 
     func clearFinished() {
@@ -931,6 +964,7 @@ final class AppState: ObservableObject {
         stopRequested = true
         for job in jobs where job.status.isRunning { stoppingJobIDs.insert(job.id) }
         currentProcess?.terminate()
+        currentReader?.cancelReading()
     }
 
     /// Stop a single job. A queued job is simply dropped; the running job's external
@@ -945,6 +979,7 @@ final class AppState: ObservableObject {
             cancelledJobIDs.insert(job.id)
             stoppingJobIDs.insert(job.id)
             currentProcess?.terminate()
+            currentReader?.cancelReading()
         default:
             break
         }
@@ -964,8 +999,10 @@ final class AppState: ObservableObject {
 
     private func process(_ id: UUID) async {
         guard let job = jobs.first(where: { $0.id == id }),
-              let ffmpeg = ffmpegURL,
               let whisper = whisperURL else { return }
+        // Optional: an AVFoundation-only decode covers the formats that matter. Only exotic
+        // containers (ogg/opus, mkv/webm...) need this, per-file, inside `MediaDecoder`.
+        let ffmpeg = ffmpegURL
 
         defer {
             updateJob(id) {
@@ -976,6 +1013,7 @@ final class AppState: ObservableObject {
             cancelledJobIDs.remove(id)
             stoppingJobIDs.remove(id)
             currentProcess = nil
+            currentReader = nil
         }
 
         guard job.sourceExists else {
@@ -1011,11 +1049,8 @@ final class AppState: ObservableObject {
             try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: workDir) }
 
-            var duration: Double?
-            if let ffprobe = ffprobeURL {
-                duration = await FFmpeg.duration(of: job.sourceURL, ffprobe: ffprobe)
-                updateJob(id) { $0.durationSeconds = duration }
-            }
+            let duration = await MediaDecoder.duration(of: job.sourceURL)
+            updateJob(id) { $0.durationSeconds = duration }
 
             let onProgress: (Double) -> Void = { [weak self] progress in
                 Task { @MainActor in
@@ -1024,6 +1059,9 @@ final class AppState: ObservableObject {
             }
             let registerProcess: (Process) -> Void = { [weak self] process in
                 self?.currentProcess = process
+            }
+            let registerReader: (AVAssetReader) -> Void = { [weak self] reader in
+                self?.currentReader = reader
             }
 
             // Deterministic attribution when the recorder kept isolated, healthy per-speaker
@@ -1034,7 +1072,7 @@ final class AppState: ObservableObject {
 
             let outputURL: URL
             if let dualTracks,
-               await Self.tracksUsable(mic: dualTracks.mic, system: dualTracks.system, ffmpeg: ffmpeg, ffprobe: ffprobeURL) {
+               await Self.tracksUsable(mic: dualTracks.mic, system: dualTracks.system) {
                 if isCancelRequested(id) {
                     updateJob(id) { $0.status = .cancelled }
                     return
@@ -1045,14 +1083,17 @@ final class AppState: ObservableObject {
                 let allowed = Languages.ordered(allowedLanguages)
                 let mixDuration = duration
                 let transcribeTrack: (URL, String, @escaping (Double) -> Void) async throws -> (blocks: [TranscriptBlock], languages: [String]) = { trackURL, speaker, trackProgress in
-                    let trackWav = try await FFmpeg.convertToWav(input: trackURL, ffmpeg: ffmpeg, register: registerProcess)
+                    let trackWav = try await MediaDecoder.convertToWav(
+                        input: trackURL, ffmpeg: ffmpeg, registerReader: registerReader, registerProcess: registerProcess
+                    )
                     defer { try? FileManager.default.removeItem(at: trackWav) }
                     if useMultilingual, let serverBinary {
-                        let trackDuration = await FFmpeg.duration(of: trackWav, ffprobe: self.ffprobeURL ?? ffmpeg) ?? mixDuration ?? 0
+                        let trackDuration = await MediaDecoder.duration(of: trackWav) ?? mixDuration ?? 0
                         let whole = [SpeakerSegment(speaker: speaker, start: 0, end: max(trackDuration, 0.1))]
                         let out = try await MultilingualTranscriber.transcribe(
-                            wav: trackWav, speakers: whole, model: modelURL, ffmpeg: ffmpeg,
+                            wav: trackWav, speakers: whole, model: modelURL,
                             serverBinary: serverBinary, allowedLanguages: allowed,
+                            initialPrompt: vocabulary,
                             isCancelled: { [weak self] in self?.isCancelRequested(id) ?? true },
                             onProgress: trackProgress
                         )
@@ -1095,9 +1136,9 @@ final class AppState: ObservableObject {
                     extraFrontmatter: captureWarning + "attribution: tracks\n"
                 )
             } else {
-                let wav = try await FFmpeg.convertToWav(input: job.sourceURL, ffmpeg: ffmpeg) { [weak self] process in
-                    self?.currentProcess = process
-                }
+                let wav = try await MediaDecoder.convertToWav(
+                    input: job.sourceURL, ffmpeg: ffmpeg, registerReader: registerReader, registerProcess: registerProcess
+                )
                 defer { try? FileManager.default.removeItem(at: wav) }
 
                 if isCancelRequested(id) {
@@ -1125,9 +1166,9 @@ final class AppState: ObservableObject {
                     wav: wav,
                     speakers: speakers,
                     model: modelURL,
-                    ffmpeg: ffmpeg,
                     serverBinary: serverBinary,
                     allowedLanguages: allowed,
+                    initialPrompt: vocabulary,
                     isCancelled: { [weak self] in self?.isCancelRequested(id) ?? true },
                     onProgress: onProgress
                 )
@@ -1232,6 +1273,9 @@ final class AppState: ObservableObject {
                     title: autoTitle
                 )
                 jobs.removeAll { $0.id == id }
+                // If the finished job's progress panel was open, follow it into the finished
+                // transcript instead of dropping back to the empty state.
+                if selectedItemID == id { selectedItemID = item.id }
                 showToast("Added “\(item.title)” to \(projectName(targetProject)).")
             } catch {
                 updateJob(id) {
@@ -1267,23 +1311,21 @@ final class AppState: ObservableObject {
     /// exists but is (near-)silent — system audio the OS never granted, or a mic that died
     /// mid-call — would make attribution a lie; in that case we return false and fall back to
     /// clustering the mix, which at least won't invent a second speaker out of silence.
-    nonisolated static func tracksUsable(mic: URL, system: URL, ffmpeg: URL, ffprobe: URL?) async -> Bool {
-        async let micOK = trackHasSpeech(mic, ffmpeg: ffmpeg, ffprobe: ffprobe)
-        async let systemOK = trackHasSpeech(system, ffmpeg: ffmpeg, ffprobe: ffprobe)
+    nonisolated static func tracksUsable(mic: URL, system: URL) async -> Bool {
+        async let micOK = trackHasSpeech(mic)
+        async let systemOK = trackHasSpeech(system)
         let (m, s) = await (micOK, systemOK)
         return m && s
     }
 
+    /// Reads the track's `.mic.m4a`/`.system.m4a` audio directly — `AVAudioFile` decodes AAC
+    /// natively, so this never needs ffmpeg (these are always the app's own recordings).
     nonisolated static func trackHasSpeech(
         _ track: URL,
-        ffmpeg: URL,
-        ffprobe: URL?,
         minSpeechSeconds: Double = 3
     ) async -> Bool {
-        guard let ffprobe,
-              let duration = await FFmpeg.duration(of: track, ffprobe: ffprobe),
-              duration >= 1 else { return false }
-        let silences = await FFmpeg.silences(in: track, ffmpeg: ffmpeg)
+        guard let duration = await MediaDecoder.duration(of: track), duration >= 1 else { return false }
+        let silences = await PCMAnalysis.silences(in: track)
         let silent = silences.reduce(0) { $0 + max(0, $1.end - $1.start) }
         return duration - silent >= minSpeechSeconds
     }

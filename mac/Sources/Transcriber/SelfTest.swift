@@ -66,6 +66,30 @@ enum SelfTest {
             semaphore.wait()
             exit(0)
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--selftest-silences"),
+           CommandLine.arguments.count > index + 1 {
+            let path = CommandLine.arguments[index + 1]
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                do { try await runSilencesComparison(path: path); print("SELFTEST OK") }
+                catch { print("SELFTEST FAILED: \(error.localizedDescription)") }
+                semaphore.signal()
+            }
+            semaphore.wait()
+            exit(0)
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--selftest-avformats"),
+           CommandLine.arguments.count > index + 1 {
+            let directory = CommandLine.arguments[index + 1]
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                do { try await runAVFormats(directory: directory); print("SELFTEST OK") }
+                catch { print("SELFTEST FAILED: \(error.localizedDescription)") }
+                semaphore.signal()
+            }
+            semaphore.wait()
+            exit(0)
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--selftest-dualtrack"),
            CommandLine.arguments.count > index + 2 {
             let mic = CommandLine.arguments[index + 1]
@@ -118,9 +142,8 @@ enum SelfTest {
     }
 
     private static func runDiarizeOnly(path: String) async throws {
-        guard let ffmpeg = Tools.find("ffmpeg") else { throw RecorderError(message: "ffmpeg not found") }
         print("converting…")
-        let wav = try await FFmpeg.convertToWav(input: URL(fileURLWithPath: path), ffmpeg: ffmpeg)
+        let wav = try await MediaDecoder.convertToWav(input: URL(fileURLWithPath: path), ffmpeg: Tools.find("ffmpeg"))
         defer { try? FileManager.default.removeItem(at: wav) }
         var threshold = Diarizer.defaultThreshold
         if let index = CommandLine.arguments.firstIndex(of: "--threshold"),
@@ -147,6 +170,95 @@ enum SelfTest {
         for segment in speakers.prefix(40) {
             print(String(format: "  %@  %6.1f – %6.1f  (%.1fs)", segment.speaker, segment.start, segment.end, segment.end - segment.start))
         }
+    }
+
+    /// Diagnostic: probes AVFoundation's real per-extension coverage against `MediaTypes.all`
+    /// (falling back to ffmpeg, if configured, for whatever AVFoundation can't open) — Apple's
+    /// supported-container set isn't guaranteed stable across macOS versions and there's no CI
+    /// to catch drift, so re-run this before any release rather than assuming last time's table.
+    /// Point it at a directory of small sample files, one per extension, e.g.:
+    ///   for ext in mp4 mov m4a mp3 wav aiff caf flac ogg opus mkv webm amr wma; do
+    ///     ffmpeg -f lavfi -i "sine=frequency=1000:duration=2" "samples/tone.$ext"
+    ///   done
+    ///   Transcriber --selftest-avformats samples/
+    private static func runAVFormats(directory: String) async throws {
+        let ffmpeg = Tools.find("ffmpeg")
+        let fm = FileManager.default
+        let entries = (try? fm.contentsOfDirectory(atPath: directory)) ?? []
+        guard !entries.isEmpty else { throw RecorderError(message: "no sample files found in \(directory)") }
+
+        var missingSamples: [String] = []
+        for ext in MediaTypes.all.sorted() {
+            guard let name = entries.first(where: { $0.lowercased().hasSuffix(".\(ext)") }) else {
+                missingSamples.append(ext)
+                continue
+            }
+            let url = URL(fileURLWithPath: directory).appendingPathComponent(name)
+
+            if let wav = try? await AVFoundationDecoder.convertToWav(input: url) {
+                try? fm.removeItem(at: wav)
+                print("  \(ext): OK (avfoundation)")
+                continue
+            }
+            if let ffmpeg, let wav = try? await FFmpeg.convertToWav(input: url, ffmpeg: ffmpeg) {
+                try? fm.removeItem(at: wav)
+                print("  \(ext): OK (ffmpeg fallback)")
+                continue
+            }
+            print("  \(ext): FAILED — \(ffmpeg == nil ? "no ffmpeg configured" : "neither decoder handled it")")
+        }
+        if !missingSamples.isEmpty {
+            print("no sample file for: \(missingSamples.joined(separator: ", "))")
+        }
+    }
+
+    /// Comparison harness for `PCMAnalysis.silences` against the ffmpeg `silencedetect` filter
+    /// it replaced — run this on real fixtures before trusting the Swift reimplementation
+    /// everywhere (per the ffmpeg-removal plan; this heuristic feeds multilingual chunking and
+    /// the dual-track speech gate, so a silent drift here is a real accuracy risk, not cosmetic).
+    /// Flags any interval whose start/end drifts more than 0.1s from ffmpeg's.
+    ///   Transcriber --selftest-silences <wav>
+    private static func runSilencesComparison(path: String) async throws {
+        let url = URL(fileURLWithPath: path)
+        let swiftResult = await PCMAnalysis.silences(in: url)
+        print("PCMAnalysis: \(swiftResult.count) silence(s)")
+        for s in swiftResult { print(String(format: "  %.2f – %.2f", s.start, s.end)) }
+
+        guard let ffmpeg = Tools.find("ffmpeg") else {
+            print("(ffmpeg not found — skipping comparison)")
+            return
+        }
+        let arguments = [
+            "-hide_banner", "-nostdin", "-i", url.path,
+            "-af", "silencedetect=noise=-35dB:d=0.35", "-f", "null", "-",
+        ]
+        let result = try await runProcess(ffmpeg, arguments)
+        var ffmpegSilences: [(start: Double, end: Double)] = []
+        var currentStart: Double?
+        for line in result.stderr.components(separatedBy: "\n") {
+            if let range = line.range(of: "silence_start: ") {
+                currentStart = Double(line[range.upperBound...].trimmingCharacters(in: .whitespaces))
+            } else if let range = line.range(of: "silence_end: "), let start = currentStart {
+                let tail = line[range.upperBound...]
+                let value = tail.split(separator: " ").first.map(String.init) ?? ""
+                if let end = Double(value) { ffmpegSilences.append((start, end)) }
+                currentStart = nil
+            }
+        }
+        print("ffmpeg silencedetect: \(ffmpegSilences.count) silence(s)")
+        for s in ffmpegSilences { print(String(format: "  %.2f – %.2f", s.start, s.end)) }
+
+        let tolerance = 0.1
+        guard swiftResult.count == ffmpegSilences.count else {
+            print("MISMATCH: different interval counts (\(swiftResult.count) vs \(ffmpegSilences.count))")
+            return
+        }
+        var allMatch = true
+        for (a, b) in zip(swiftResult, ffmpegSilences) where abs(a.start - b.start) > tolerance || abs(a.end - b.end) > tolerance {
+            print("MISMATCH: \(a) vs \(b)")
+            allMatch = false
+        }
+        if allMatch { print("MATCH within \(tolerance)s tolerance") }
     }
 
     /// A/B-compares the downloaded GGUF chat models on a real transcript: summarization
@@ -1136,7 +1248,6 @@ enum SelfTest {
     }
 
     private static func runMultilingual(path: String) async throws {
-        guard let ffmpeg = Tools.find("ffmpeg") else { throw RecorderError(message: "ffmpeg not found") }
         guard let server = Tools.find("whisper-server") else { throw RecorderError(message: "whisper-server not found") }
         let model = WhisperModel.byID("large-v3-turbo-q5_0")
         let modelURL = ModelManager.modelsDirectory.appendingPathComponent(model.fileName)
@@ -1150,7 +1261,7 @@ enum SelfTest {
         }
 
         print("converting…")
-        let wav = try await FFmpeg.convertToWav(input: URL(fileURLWithPath: path), ffmpeg: ffmpeg)
+        let wav = try await MediaDecoder.convertToWav(input: URL(fileURLWithPath: path), ffmpeg: Tools.find("ffmpeg"))
         defer { try? FileManager.default.removeItem(at: wav) }
 
         print("diarizing…")
@@ -1162,7 +1273,6 @@ enum SelfTest {
             wav: wav,
             speakers: speakers,
             model: modelURL,
-            ffmpeg: ffmpeg,
             serverBinary: server,
             allowedLanguages: allowed,
             onProgress: { print(String(format: "  progress %.0f%%", $0 * 100)) }
@@ -1177,9 +1287,8 @@ enum SelfTest {
     ///   Transcriber --selftest-dualtrack mic.m4a system.m4a [--allowed ru,de,en]
     /// Mirrors what AppState does when a recording kept isolated mic/system tracks.
     private static func runDualTrack(mic: String, system: String) async throws {
-        guard let ffmpeg = Tools.find("ffmpeg") else { throw RecorderError(message: "ffmpeg not found") }
         guard let server = Tools.find("whisper-server") else { throw RecorderError(message: "whisper-server not found") }
-        let ffprobe = Tools.find("ffprobe")
+        let ffmpeg = Tools.find("ffmpeg")
         let model = WhisperModel.byID("large-v3-turbo-q5_0")
         let modelURL = ModelManager.modelsDirectory.appendingPathComponent(model.fileName)
 
@@ -1192,17 +1301,17 @@ enum SelfTest {
 
         let micURL = URL(fileURLWithPath: mic)
         let systemURL = URL(fileURLWithPath: system)
-        let usable = await AppState.tracksUsable(mic: micURL, system: systemURL, ffmpeg: ffmpeg, ffprobe: ffprobe)
+        let usable = await AppState.tracksUsable(mic: micURL, system: systemURL)
         print("tracks usable (both carry speech): \(usable)")
 
         let transcribeTrack: (URL, String, @escaping (Double) -> Void) async throws -> (blocks: [TranscriptBlock], languages: [String]) = { trackURL, speaker, progress in
             print("  [\(speaker)] converting…")
-            let trackWav = try await FFmpeg.convertToWav(input: trackURL, ffmpeg: ffmpeg)
+            let trackWav = try await MediaDecoder.convertToWav(input: trackURL, ffmpeg: ffmpeg)
             defer { try? FileManager.default.removeItem(at: trackWav) }
-            let dur = await FFmpeg.duration(of: trackWav, ffprobe: ffprobe ?? ffmpeg) ?? 0
+            let dur = await MediaDecoder.duration(of: trackWav) ?? 0
             let whole = [SpeakerSegment(speaker: speaker, start: 0, end: max(dur, 0.1))]
             let out = try await MultilingualTranscriber.transcribe(
-                wav: trackWav, speakers: whole, model: modelURL, ffmpeg: ffmpeg,
+                wav: trackWav, speakers: whole, model: modelURL,
                 serverBinary: server, allowedLanguages: allowed, onProgress: progress
             )
             return (out.blocks, out.languages)
@@ -1226,9 +1335,8 @@ enum SelfTest {
     /// and a before/after diff of each repaired block so the wiring can be verified by eye.
     private static func runMixRepair(transcript: String, audio: String) async throws {
         struct RepairError: LocalizedError { let message: String; var errorDescription: String? { message } }
-        guard let ffmpeg = Tools.find("ffmpeg") else { throw RecorderError(message: "ffmpeg not found") }
         guard let server = Tools.find("whisper-server") else { throw RecorderError(message: "whisper-server not found") }
-        let ffprobe = Tools.find("ffprobe")
+        let ffmpeg = Tools.find("ffmpeg")
 
         let whisperModel = ModelManager.modelsDirectory.appendingPathComponent(WhisperModel.byID("large-v3-turbo-q5_0").fileName)
         var llmID = "qwen3.5-4b-q5"
@@ -1247,9 +1355,9 @@ enum SelfTest {
         guard !refs.isEmpty else { throw RepairError(message: "no timestamped speaker turns") }
         print("declared languages: \(declared.joined(separator: ", "))   turns: \(refs.count)")
 
-        let wav = try await FFmpeg.convertToWav(input: URL(fileURLWithPath: audio), ffmpeg: ffmpeg)
+        let wav = try await MediaDecoder.convertToWav(input: URL(fileURLWithPath: audio), ffmpeg: ffmpeg)
         defer { try? FileManager.default.removeItem(at: wav) }
-        let totalDuration = await FFmpeg.duration(of: wav, ffprobe: ffprobe ?? ffmpeg) ?? 0
+        let totalDuration = await MediaDecoder.duration(of: wav) ?? 0
 
         var blocks: [TranscriptBlock] = []
         for (i, ref) in refs.enumerated() {
@@ -1275,7 +1383,7 @@ enum SelfTest {
             wordsForBlock: { index in
                 let block = blocks[index]
                 let clipStart = max(0, block.start - 0.12)
-                let clip = try await FFmpeg.extract(from: wav, start: block.start, end: block.end, ffmpeg: ffmpeg)
+                let clip = try await PCMAnalysis.extract(from: wav, start: block.start, end: block.end)
                 defer { try? FileManager.default.removeItem(at: clip) }
                 let out = try await WhisperServer.shared.transcribeWords(wav: clip, language: nil)
                 return out.words.map { WhisperServer.Word(text: $0.text, start: clipStart + $0.start, end: clipStart + $0.end) }
@@ -1289,7 +1397,7 @@ enum SelfTest {
                 return spans
             },
             retranscribeSpan: { start, end, language in
-                let clip = try await FFmpeg.extract(from: wav, start: start, end: end, ffmpeg: ffmpeg)
+                let clip = try await PCMAnalysis.extract(from: wav, start: start, end: end)
                 defer { try? FileManager.default.removeItem(at: clip) }
                 let out = try await WhisperServer.shared.transcribe(wav: clip, language: language)
                 print("    [\(language)] \(String(format: "%.2f–%.2f", start, end)) → \"\(out.text.trimmingCharacters(in: .whitespaces))\"")
@@ -1309,7 +1417,6 @@ enum SelfTest {
     }
 
     private static func run(path: String) async throws {
-        guard let ffmpeg = Tools.find("ffmpeg") else { throw RecorderError(message: "ffmpeg not found") }
         guard let whisper = Tools.find("whisper-cli", "whisper-cpp") else { throw RecorderError(message: "whisper-cli not found") }
         let model = WhisperModel.byID("large-v3-turbo-q5_0")
         let modelURL = ModelManager.modelsDirectory.appendingPathComponent(model.fileName)
@@ -1318,7 +1425,7 @@ enum SelfTest {
         }
 
         print("converting…")
-        let wav = try await FFmpeg.convertToWav(input: URL(fileURLWithPath: path), ffmpeg: ffmpeg)
+        let wav = try await MediaDecoder.convertToWav(input: URL(fileURLWithPath: path), ffmpeg: Tools.find("ffmpeg"))
         defer { try? FileManager.default.removeItem(at: wav) }
 
         // Same accuracy configuration the app uses, so this hook verifies what ships.

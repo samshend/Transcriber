@@ -23,19 +23,19 @@ enum MultilingualTranscriber {
         wav: URL,
         speakers: [SpeakerSegment],
         model: URL,
-        ffmpeg: URL,
         serverBinary: URL,
         allowedLanguages: [String] = [],
+        initialPrompt: String? = nil,
         isCancelled: () -> Bool = { false },
         onProgress: ((Double) -> Void)? = nil
     ) async throws -> Output {
-        let silences = await FFmpeg.silences(in: wav, ffmpeg: ffmpeg)
+        let silences = await PCMAnalysis.silences(in: wav)
         let chunks = makeChunks(speakers: speakers, silences: silences)
         guard !chunks.isEmpty else {
             throw CommandFailure(tool: "diarizer", status: 0, stderrTail: "No speech detected in the file.")
         }
 
-        try await WhisperServer.shared.ensureRunning(model: model, serverBinary: serverBinary)
+        try await WhisperServer.shared.ensureRunning(model: model, serverBinary: serverBinary, initialPrompt: initialPrompt)
 
         var results: [ChunkResult] = []
         var lastLanguage: String?
@@ -50,12 +50,11 @@ enum MultilingualTranscriber {
             let maxLeft = index == 0 ? 3.0 : 0.6
             let leftPad = max(0.12, min(maxLeft, (chunk.start - previousEnd) / 2))
             let rightPad = max(0.12, min(index == chunks.count - 1 ? 1.0 : 0.6, (nextStart - chunk.end) / 2))
-            let piece = try await FFmpeg.extract(
+            let piece = try await PCMAnalysis.extract(
                 from: wav,
                 start: max(0, chunk.start - leftPad),
                 end: chunk.end + rightPad,
-                padding: 0,
-                ffmpeg: ffmpeg
+                padding: 0
             )
             defer { try? FileManager.default.removeItem(at: piece) }
 
@@ -94,22 +93,32 @@ enum MultilingualTranscriber {
 
         // Pass 2: fix chunks whose detected language is almost certainly wrong.
         // Whisper mis-hears filler sounds ("Mm-hmm", "Yes", "Ага") as French/Polish/
-        // Portuguese. Anything in a language with a negligible overall share, or any very
-        // short chunk that disagrees with the dominant language, is re-transcribed in the
-        // conversation's dominant language.
+        // Portuguese. Anything in a language with a negligible overall share is
+        // re-transcribed in the conversation's dominant language — and so is a short chunk,
+        // but ONLY when its own language is also a minor one overall. Without that guard, a
+        // call that genuinely switches language for a long stretch (e.g. small talk in
+        // Russian, then a formal conversation entirely in English) gets its short utterances
+        // in that second language ("Okay", "Yeah", "Got it") flipped back into the first —
+        // and since the audio really was English, forcing whisper to decode it as Russian
+        // doesn't translate it, it hallucinates similar-sounding Russian words instead.
         if let dominant = dominantLanguage(in: results) {
             let spurious = spuriousLanguages(in: results, dominant: dominant)
+            let counts = characterCounts(in: results)
+            let total = counts.values.reduce(0, +)
             let suspects = results.indices.filter { index in
                 let result = results[index]
                 guard !result.wasForced, !result.text.isEmpty,
                       let language = result.language, language != dominant else { return false }
-                return spurious.contains(language) || result.text.count < shortTextThreshold
+                if spurious.contains(language) { return true }
+                guard result.text.count < shortTextThreshold, total > 0 else { return false }
+                let share = Double(counts[language, default: 0]) / Double(total)
+                return share < 0.10
             }
             for (offset, index) in suspects.enumerated() {
                 if isCancelled() { break }
                 let chunk = results[index].chunk
-                let piece = try await FFmpeg.extract(
-                    from: wav, start: chunk.start, end: chunk.end, padding: 0.12, ffmpeg: ffmpeg
+                let piece = try await PCMAnalysis.extract(
+                    from: wav, start: chunk.start, end: chunk.end, padding: 0.12
                 )
                 defer { try? FileManager.default.removeItem(at: piece) }
                 if let redone = try? await WhisperServer.shared.transcribe(wav: piece, language: dominant) {

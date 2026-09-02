@@ -8,27 +8,37 @@ actor WhisperServer {
     private var process: Process?
     private var port = 0
     private var modelPath: String?
+    private var runningPrompt: String?
 
     struct ServerFailure: LocalizedError {
         let message: String
         var errorDescription: String? { "whisper-server: \(message)" }
     }
 
-    func ensureRunning(model: URL, serverBinary: URL) async throws {
-        if let process, process.isRunning, modelPath == model.path { return }
+    /// `initialPrompt` biases the whole session toward domain vocabulary (names, jargon —
+    /// same idea as `Whisper.accuracyArguments`'s `--prompt` on the CLI path). whisper-server
+    /// only accepts a prompt at process launch, not per request, so changing it means
+    /// restarting the server — same as a model change.
+    func ensureRunning(model: URL, serverBinary: URL, initialPrompt: String? = nil) async throws {
+        let prompt = normalizedPrompt(initialPrompt)
+        if let process, process.isRunning, modelPath == model.path, runningPrompt == prompt { return }
         stop()
 
         let chosenPort = Int.random(in: 49500...64000)
         let threads = max(4, ProcessInfo.processInfo.activeProcessorCount - 2)
         let serverProcess = Process()
         serverProcess.executableURL = serverBinary
-        serverProcess.arguments = [
+        var arguments = [
             "-m", model.path,
             "--host", "127.0.0.1",
             "--port", String(chosenPort),
             "-t", String(threads),
             "-l", "auto",
         ]
+        if let prompt {
+            arguments += ["--prompt", prompt, "--carry-initial-prompt"]
+        }
+        serverProcess.arguments = arguments
         serverProcess.standardOutput = FileHandle.nullDevice
         serverProcess.standardError = FileHandle.nullDevice
         serverProcess.standardInput = FileHandle.nullDevice
@@ -36,6 +46,7 @@ actor WhisperServer {
         process = serverProcess
         port = chosenPort
         modelPath = model.path
+        runningPrompt = prompt
 
         // Wait until the server answers HTTP (it listens only after the model loads).
         let probe = URL(string: "http://127.0.0.1:\(chosenPort)/")!
@@ -130,5 +141,11 @@ actor WhisperServer {
         process?.terminate()
         process = nil
         modelPath = nil
+        runningPrompt = nil
+    }
+
+    private func normalizedPrompt(_ prompt: String?) -> String? {
+        let trimmed = prompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty ?? true) ? nil : trimmed
     }
 }

@@ -318,7 +318,6 @@ struct SettingsView: View {
             }
 
             Section("Tools") {
-                toolRow(name: "ffmpeg", url: app.ffmpegURL)
                 toolRow(name: "whisper-cli", url: app.whisperURL)
                 if !app.missingTools.isEmpty {
                     HStack {
@@ -329,6 +328,29 @@ struct SettingsView: View {
                         Button("Re-check") { app.refreshTools() }
                     }
                 }
+            }
+
+            Section("ffmpeg (optional plugin)") {
+                Text("Most files decode without any extra install. ffmpeg only adds support for a few less-common formats — ogg, opus, mkv, webm, and a handful of others.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                toolRow(name: "ffmpeg", url: app.ffmpegURL)
+                HStack {
+                    Text("Custom path")
+                    Spacer()
+                    Text(app.customFFmpegPath.isEmpty ? "auto-detect" : app.customFFmpegPath)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button("Choose…") { chooseFFmpegPath() }
+                    if !app.customFFmpegPath.isEmpty {
+                        Button("Clear") { app.customFFmpegPath = ""; app.refreshTools() }
+                    }
+                }
+                Text("Don't have it? `brew install ffmpeg`, or download a build and point this at the binary.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -488,6 +510,18 @@ struct SettingsView: View {
     private func openAutomationSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func chooseFFmpegPath() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose an ffmpeg binary"
+        if panel.runModal() == .OK, let url = panel.urls.first {
+            app.customFFmpegPath = url.path
+            app.refreshTools()
         }
     }
 

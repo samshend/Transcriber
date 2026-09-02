@@ -78,77 +78,10 @@ enum FFmpeg {
         return markers.contains { stderr.contains($0) }
     }
 
-    /// Extracts a time slice of a WAV file (with a little padding) for chunked transcription.
-    static func extract(
-        from wav: URL,
-        start: Double,
-        end: Double,
-        padding: Double = 0.12,
-        ffmpeg: URL
-    ) async throws -> URL {
-        let output = FileManager.default.temporaryDirectory
-            .appendingPathComponent("transcriber-chunk-\(UUID().uuidString).wav")
-        let from = max(0, start - padding)
-        let duration = (end + padding) - from
-        let arguments = [
-            "-hide_banner", "-nostdin", "-y",
-            "-ss", String(format: "%.3f", from),
-            "-t", String(format: "%.3f", duration),
-            "-i", wav.path,
-            "-c", "copy",
-            output.path,
-        ]
-        let result = try await runProcess(ffmpeg, arguments)
-        guard result.status == 0 else {
-            throw CommandFailure(
-                tool: "ffmpeg",
-                status: result.status,
-                stderrTail: String(result.stderr.suffix(300))
-            )
-        }
-        return output
-    }
-
-    /// Finds silences (for splitting speech into language-consistent chunks).
-    static func silences(in wav: URL, ffmpeg: URL) async -> [(start: Double, end: Double)] {
-        let arguments = [
-            "-hide_banner", "-nostdin",
-            "-i", wav.path,
-            "-af", "silencedetect=noise=-35dB:d=0.35",
-            "-f", "null", "-",
-        ]
-        guard let result = try? await runProcess(ffmpeg, arguments), result.status == 0 else {
-            return []
-        }
-        var silences: [(start: Double, end: Double)] = []
-        var currentStart: Double?
-        for line in result.stderr.components(separatedBy: "\n") {
-            if let range = line.range(of: "silence_start: ") {
-                currentStart = Double(line[range.upperBound...].trimmingCharacters(in: .whitespaces))
-            } else if let range = line.range(of: "silence_end: "), let start = currentStart {
-                let tail = line[range.upperBound...]
-                let value = tail.split(separator: " ").first.map(String.init) ?? ""
-                if let end = Double(value) {
-                    silences.append((start, end))
-                }
-                currentStart = nil
-            }
-        }
-        return silences
-    }
-
-    static func duration(of file: URL, ffprobe: URL) async -> Double? {
-        let arguments = [
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0",
-            file.path,
-        ]
-        guard let result = try? await runProcess(ffprobe, arguments), result.status == 0 else {
-            return nil
-        }
-        return Double(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
+    // `extract`/`silences`/`duration` moved to `PCMAnalysis`/`MediaDecoder` — pure Swift via
+    // AVFoundation, since they only ever ran on audio the app already decoded or recorded
+    // itself. ffmpeg is now used only for the initial decode of a container AVFoundation can't
+    // read, via `MediaDecoder.convertToWav`'s fallback to `convertToWav` above.
 }
 
 /// Silero VAD, used to skip silence before whisper ever sees it.
