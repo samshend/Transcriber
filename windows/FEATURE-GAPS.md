@@ -24,7 +24,7 @@ a false sense that meetings are being captured safely.
 Verified on this Windows 11 machine:
 
 - .NET 10 and WinUI project build successfully with zero warnings.
-- All 58 `Transcriber.Core.Tests` tests pass.
+- All 59 `Transcriber.Core.Tests` tests pass.
 - The WinUI application launches.
 - FFmpeg, whisper.cpp, the large-v3-turbo model, and Silero VAD work end to end.
 - Import -> transcription -> Markdown/HTML -> managed library is implemented.
@@ -82,7 +82,7 @@ bundled FFmpeg/Whisper tools. Automated hardware tests recorded both sources, re
 WAVs, produced an M4A, correctly recognized spoken microphone test phrases, ingested the
 transcript/audio, and left the WinUI app responsive. Pause/resume and confirmed discard were also
 exercised. Saved audio playback, codec-independent WAV preparation, and the native seek/progress
-control have been exercised on this machine. The test suite now contains 58 tests.
+control have been exercised on this machine. The test suite now contains 59 tests.
 
 This proves the architecture, not production reliability. The 60-90 minute soak test, endpoint
 changes, suspend/lock, low disk, and forced-source-failure cases below remain open.

@@ -31,7 +31,7 @@ investment — not local summarisation.
 | Transcription quality | **implemented:** persisted model choice, automatic missing-model download, profession/custom vocabulary hints |
 | Onboarding | **implemented:** name, work area, and specialist vocabulary; name labels the local mic track |
 
-**58 xUnit tests green** (`dotnet test`), covering merging, speaker attribution/renaming,
+**59 xUnit tests green** (`dotnet test`), covering merging, speaker attribution/renaming,
 whisper flags/JSON, and the
 full library lifecycle. The library layer is byte-compatible with the macOS app's `library.json`
 model and transcript format (FORMAT contract), so the two products read each other's data.

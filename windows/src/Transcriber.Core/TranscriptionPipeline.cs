@@ -182,6 +182,16 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
                         cancellationToken,
                         numberOfSpeakers: request.ExpectedSpeakers), cancellationToken).ConfigureAwait(false);
                     log.Write($"STAGE diarization_complete segments={speakerSegments.Count}");
+                    var microphoneOnlyRecording = request.Tracks.Any(track =>
+                            string.Equals(Path.GetFileName(track), "microphone.wav", StringComparison.OrdinalIgnoreCase)) &&
+                        !request.Tracks.Any(track =>
+                            string.Equals(Path.GetFileName(track), "system.wav", StringComparison.OrdinalIgnoreCase));
+                    if (microphoneOnlyRecording && !string.IsNullOrWhiteSpace(request.LocalSpeakerName))
+                    {
+                        speakerSegments = SpeakerAttribution.NameFirstSpeaker(
+                            speakerSegments, request.LocalSpeakerName);
+                        attribution = "mixed-microphone-inferred-local";
+                    }
                 }
 
                 progress?.Report(new PipelineProgress(PipelineStage.Writing, null, "Writing transcript…"));

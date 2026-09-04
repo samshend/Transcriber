@@ -178,6 +178,21 @@ public class TranscriptMergerTests
     }
 
     [Fact]
+    public void MicrophoneOnlyRecordingNamesTheFirstDetectedVoice()
+    {
+        var timeline = new[]
+        {
+            new SpeakerSegment("Speaker 1", 1, 8),
+            new SpeakerSegment("Speaker 2", 10, 30),
+            new SpeakerSegment("Speaker 1", 32, 36),
+        };
+
+        var named = SpeakerAttribution.NameFirstSpeaker(timeline, " Sam ");
+
+        Assert.Equal(new[] { "Sam", "Speaker 2", "Sam" }, named.Select(item => item.Speaker));
+    }
+
+    [Fact]
     public void AutoDiarizationFoldsTinyPhantomIntoNearestRealSpeaker()
     {
         var segments = new[]

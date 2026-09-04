@@ -73,6 +73,24 @@ public static class SpeakerAttribution
         return units.Select(unit => (Segment: unit,
             Speaker: speakers.Count == 0 ? null : (string?)Resolve(unit, speakers))).ToList();
     }
+
+    /// <summary>
+    /// When a recording contains only the laptop microphone, both nearby and played-back voices
+    /// share one track. The first detected voice is the best available local-user hint: recording
+    /// normally starts immediately before the user speaks. This is deliberately not used for
+    /// imported/mixed files, where there is no such provenance.
+    /// </summary>
+    public static List<SpeakerSegment> NameFirstSpeaker(
+        IReadOnlyList<SpeakerSegment> segments,
+        string localName)
+    {
+        if (segments.Count == 0 || string.IsNullOrWhiteSpace(localName)) return segments.ToList();
+        var first = segments.OrderBy(segment => segment.Start).First().Speaker;
+        var name = localName.Trim();
+        return segments.Select(segment => segment.Speaker == first
+            ? segment with { Speaker = name }
+            : segment).ToList();
+    }
 }
 
 /// <summary>Offline, local speaker diarization through sherpa-onnx.</summary>
@@ -98,23 +116,45 @@ public static class SpeakerDiarizer
         config.Clustering.NumClusters = numberOfSpeakers;
         config.Clustering.Threshold = clusteringThreshold;
 
-        using var diarizer = new OfflineSpeakerDiarization(config);
         var (samples, sampleRate) = PcmWave.ReadMono16(mono16KhzWavePath);
-        if (sampleRate != diarizer.SampleRate)
-            throw new InvalidDataException($"Diarizer expects {diarizer.SampleRate} Hz audio, got {sampleRate} Hz.");
-
-        var callback = new OfflineSpeakerDiarizationProgressCallback((completed, total, _) =>
+        List<RawSpeakerSegment> Run(OfflineSpeakerDiarizationConfig attemptConfig)
         {
-            if (total > 0) progress?.Invoke(Math.Clamp((double)completed / total, 0, 1));
-            return cancellationToken.IsCancellationRequested ? 1 : 0;
-        });
-        var result = diarizer.ProcessWithCallback(samples, callback, IntPtr.Zero);
-        cancellationToken.ThrowIfCancellationRequested();
+            using var diarizer = new OfflineSpeakerDiarization(attemptConfig);
+            if (sampleRate != diarizer.SampleRate)
+                throw new InvalidDataException($"Diarizer expects {diarizer.SampleRate} Hz audio, got {sampleRate} Hz.");
+            var callback = new OfflineSpeakerDiarizationProgressCallback((completed, total, _) =>
+            {
+                if (total > 0) progress?.Invoke(Math.Clamp((double)completed / total, 0, 1));
+                return cancellationToken.IsCancellationRequested ? 1 : 0;
+            });
+            var result = diarizer.ProcessWithCallback(samples, callback, IntPtr.Zero);
+            cancellationToken.ThrowIfCancellationRequested();
+            return result.OrderBy(segment => segment.Start)
+                .Select(segment => new RawSpeakerSegment(segment.Speaker, segment.Start, segment.End))
+                .ToList();
+        }
 
-        var raw = result
-            .OrderBy(segment => segment.Start)
-            .Select(segment => new RawSpeakerSegment(segment.Speaker, segment.Start, segment.End))
-            .ToList();
+        var raw = Run(config);
+        var actualCount = raw.Select(segment => segment.Speaker).Distinct().Count();
+        // sherpa 1.13.5 can occasionally return one cluster even when NumClusters=2, especially
+        // for a short second voice played through a phone into the same microphone. Its automatic
+        // clustering with a lower threshold separates that real sample correctly. Retry only when
+        // the explicit contract was missed, and accept the retry only if it gets closer.
+        if (numberOfSpeakers > 1 && actualCount != numberOfSpeakers)
+        {
+            var retryConfig = new OfflineSpeakerDiarizationConfig();
+            retryConfig.Segmentation.Pyannote.Model = segmentationModelPath;
+            retryConfig.Segmentation.NumThreads = Math.Max(1, Environment.ProcessorCount / 2);
+            retryConfig.Embedding.Model = embeddingModelPath;
+            retryConfig.Embedding.NumThreads = Math.Max(1, Environment.ProcessorCount / 2);
+            retryConfig.Clustering.NumClusters = -1;
+            retryConfig.Clustering.Threshold = 0.70f;
+            progress?.Invoke(0);
+            var retry = Run(retryConfig);
+            var retryCount = retry.Select(segment => segment.Speaker).Distinct().Count();
+            if (Math.Abs(retryCount - numberOfSpeakers) < Math.Abs(actualCount - numberOfSpeakers))
+                raw = retry;
+        }
         if (numberOfSpeakers < 0) raw = MergePhantomSpeakers(raw);
 
         var labels = new Dictionary<int, string>();
