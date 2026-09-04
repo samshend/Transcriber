@@ -23,6 +23,8 @@ GETTING STARTED
    cancels and waits for the worker to stop.
 6. You can change transcription quality in Settings. If that model is not installed, the app
    downloads and verifies it automatically before switching.
+7. On first launch, enter your name and work area. Your microphone track uses that name in
+   transcripts, and the selected work area adds a local vocabulary hint for specialist terms.
 
 IMPORTANT LIMITATIONS
 ---------------------

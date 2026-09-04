@@ -118,6 +118,10 @@ try
             Language = Value("language") ?? "auto",
             Vocabulary = Value("vocabulary"),
             OutputDirectory = Value("out"),
+            ExpectedSpeakers = int.TryParse(Value("speakers"), out var expectedSpeakers)
+                ? expectedSpeakers
+                : -1,
+            LocalSpeakerName = Value("local-speaker") ?? "You",
         },
         progress);
 

@@ -27,10 +27,11 @@ investment — not local summarisation.
 | Format parity with the macOS app | **verified** — output parses correctly through the Mac MCP server |
 | `Transcriber.App` — WinUI 3 GUI (3-column: projects / list / detail + audio player + drag-drop) | **builds cleanly on Windows**; launch/UI testing in progress |
 | Recording — WASAPI mic + loopback | **first vertical slice implemented and hardware-tested**; reliability hardening remains |
-| Diarization (speaker labels) | **first slice implemented:** sherpa-onnx + pyannote/3D-Speaker, native C# |
-| Transcription quality | **implemented:** persisted Faster / Balanced / More accurate model slider |
+| Diarization (speaker labels) | **implemented:** count prompt, phantom cleanup, source-aware mic/remote attribution, mixed-audio utterance attribution |
+| Transcription quality | **implemented:** persisted model choice, automatic missing-model download, profession/custom vocabulary hints |
+| Onboarding | **implemented:** name, work area, and specialist vocabulary; name labels the local mic track |
 
-**51 xUnit tests green** (`dotnet test`), covering merging, speaker attribution/renaming,
+**58 xUnit tests green** (`dotnet test`), covering merging, speaker attribution/renaming,
 whisper flags/JSON, and the
 full library lifecycle. The library layer is byte-compatible with the macOS app's `library.json`
 model and transcript format (FORMAT contract), so the two products read each other's data.
@@ -49,8 +50,10 @@ What it implements (all wired to the verified `Transcriber.Core`):
 - Project **badges** in the "All" view, and per-item Export / Rename / Delete / Open.
 
 Recording now captures default mic + system loopback, supports pause/resume/discard, retains
-separate source tracks, finalizes through FFmpeg, and automatically transcribes. It still needs
-long-call/device-change reliability hardening. Diarization is not included yet.
+separate source tracks, asks for the participant count, finalizes through FFmpeg, and automatically
+transcribes. The local user's name is assigned deterministically to the mic track; the system track
+is diarized among the remaining participants. It still needs long-call/device-change reliability
+hardening and validation with real retained 3+ participant tracks.
 
 ### Building it on Windows (inside the VM)
 
@@ -143,18 +146,21 @@ dotnet run --project src/Transcriber.Cli -- ~/some-call.m4a --language ru \
 - **Paragraph merging.** Whisper's 10–30 s segments must be merged or a single two-minute answer
   renders as thirteen repeated speaker headers. Thresholds match the macOS app: 3 s gap, ~120 s
   cap, and the cap only applies at a sentence boundary.
-- **Custom vocabulary is available but unproven.** `--prompt` is wired up, but on the one sample
-  tested it did not measurably help and slightly hurt capitalisation. Treat as untested.
+- **Custom vocabulary is a hint, not a guarantee.** Onboarding combines a selected work-area preset
+  with user-entered names and jargon and passes it through `--prompt`. It should be evaluated on
+  domain-specific samples because an irrelevant prompt can reduce quality.
 
 ## Known gaps
 
 Hardware-specific CPU/CUDA measurements and repeatable benchmark rules are documented in
 [PERFORMANCE.md](PERFORMANCE.md).
 
-- **Diarization needs multi-speaker tuning.** The native sherpa-onnx pipeline, pyannote
-  segmentation, 3D-Speaker embeddings, timed attribution, Markdown labels, speaker counts, and
-  rename UI are implemented. A one-speaker hardware clip passes end to end. Real two-/four-person
-  calls are still needed to tune clustering and phantom-speaker cleanup. The sherpa-onnx code is
+- **Diarization still needs 3+ participant validation.** The native sherpa-onnx pipeline, pyannote
+  segmentation, 3D-Speaker embeddings, expected-count constraint, phantom-speaker cleanup,
+  source-track attribution, timed utterance attribution, and rename UI are implemented. The
+  supplied mixed two-person sample now stays at two speakers when the known count is selected;
+  retained separate mic/system tracks were not available on this machine for the stronger
+  source-aware validation. The sherpa-onnx code is
   Apache-2.0; model-weight redistribution licensing must be confirmed before commercial bundling.
 - **No Vulkan whisper build.** whisper.cpp ships no prebuilt Vulkan binary for Windows, and
   Vulkan is the entire integrated-GPU story for GPU-less laptops (upstream claims ~12× over CPU

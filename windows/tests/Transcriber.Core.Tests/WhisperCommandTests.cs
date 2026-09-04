@@ -44,12 +44,14 @@ public class WhisperCommandTests
             "/m/model.bin", "/tmp/a.wav", "/tmp/out",
             language: "ru", vadModelPath: "/m/silero.bin", vocabulary: "Copilot", threads: 8);
 
-        Assert.Contains("-oj", arguments);
+        Assert.Contains("-ojf", arguments);
         Assert.Equal("/tmp/out", arguments[arguments.IndexOf("-of") + 1]);
         Assert.Equal("ru", arguments[arguments.IndexOf("-l") + 1]);
         Assert.Equal("8", arguments[arguments.IndexOf("-t") + 1]);
         Assert.Contains("--vad", arguments);
         Assert.Contains("--prompt", arguments);
+        Assert.Contains("--split-on-word", arguments);
+        Assert.Equal("50", arguments[arguments.IndexOf("--max-len") + 1]);
     }
 
     [Theory]
@@ -94,5 +96,37 @@ public class WhisperCommandTests
 
         Assert.Empty(result.Segments);
         Assert.Equal("en", result.Language);
+    }
+
+    [Fact]
+    public void FullJsonTokensBecomeWordTimedSegmentsOnTheParentTimeline()
+    {
+        const string json = """
+            {
+              "result": { "language": "en" },
+              "transcription": [{
+                "offsets": { "from": 30770, "to": 37860 },
+                "text": " the appointment. Okay, got it.",
+                "tokens": [
+                  { "text": "[_BEG_]", "offsets": { "from": 0, "to": 0 } },
+                  { "text": " the", "offsets": { "from": 23320, "to": 23550 } },
+                  { "text": " appointment", "offsets": { "from": 23550, "to": 24300 } },
+                  { "text": ".", "offsets": { "from": 24300, "to": 24400 } },
+                  { "text": " Okay", "offsets": { "from": 28000, "to": 28400 } },
+                  { "text": ",", "offsets": { "from": 28400, "to": 28450 } },
+                  { "text": " got", "offsets": { "from": 28450, "to": 28700 } },
+                  { "text": " it", "offsets": { "from": 28700, "to": 28900 } },
+                  { "text": ".", "offsets": { "from": 28900, "to": 29000 } }
+                ]
+              }]
+            }
+            """;
+
+        var result = WhisperCommand.ParseJson(json);
+
+        Assert.Equal(new[] { "the", "appointment.", "Okay,", "got", "it." },
+            result.Segments.Select(segment => segment.Text));
+        Assert.Equal(30.77, result.Segments[0].Start, 2);
+        Assert.Equal(35.45, result.Segments[2].Start, 2);
     }
 }

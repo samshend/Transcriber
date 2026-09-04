@@ -7,7 +7,8 @@
     xmlns:mux="using:Microsoft.UI.Xaml.Controls"
     Title="Transcriber">
 
-    <Grid ColumnSpacing="0" DataContext="{x:Bind Vm}" AllowDrop="True"
+    <Grid x:Name="RootGrid" ColumnSpacing="0" DataContext="{x:Bind Vm}" AllowDrop="True"
+          Loaded="RootGrid_Loaded"
           DragOver="Window_DragOver" Drop="Window_Drop">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />

@@ -36,6 +36,32 @@ public class TranscriptMergerTests
         Assert.Equal("Speaker 2", speaker);
     }
 
+    [Fact]
+    public void WordAttributionStabilizesAFalseBoundaryFlipWithinASentence()
+    {
+        var words = new[]
+        {
+            Seg(10.0, 10.3, "This"), Seg(10.3, 10.6, "document"),
+            Seg(10.6, 10.8, "won't"), Seg(10.8, 11.2, "change."),
+            Seg(12.0, 12.2, "Okay,"), Seg(12.2, 12.5, "got"), Seg(12.5, 12.8, "it."),
+        };
+        var timeline = new[]
+        {
+            new SpeakerSegment("Speaker 2", 9.5, 10.5),
+            new SpeakerSegment("Speaker 1", 10.5, 10.75), // noisy micro-flip
+            new SpeakerSegment("Speaker 2", 10.75, 11.5),
+            new SpeakerSegment("Speaker 1", 11.8, 13),
+        };
+
+        var units = SpeakerAttribution.AttributeUtterances(words, timeline);
+
+        Assert.Equal(2, units.Count);
+        Assert.Equal("Speaker 2", units[0].Speaker);
+        Assert.Equal("This document won't change.", units[0].Segment.Text);
+        Assert.Equal("Speaker 1", units[1].Speaker);
+        Assert.Equal("Okay, got it.", units[1].Segment.Text);
+    }
+
     private static TranscriptSegment Seg(double start, double end, string text) => new(start, end, text);
 
     [Fact]
@@ -128,6 +154,43 @@ public class TranscriptMergerTests
 
         Assert.Single(blocks);
         Assert.Equal("First part of the explanation, continuing right along.", blocks[0].Text);
+    }
+
+    [Fact]
+    public void SourceTrackMergeDropsAnEchoCopyButKeepsDistinctOverlap()
+    {
+        var local = new (TranscriptSegment Segment, string? Speaker)[]
+        {
+            (Seg(0, 4, "Please send the residence permit documents."), "Anastasia"),
+            (Seg(5, 8, "Yes, I will send those tomorrow."), "Anastasia"),
+        };
+        var remote = new (TranscriptSegment Segment, string? Speaker)[]
+        {
+            (Seg(0.2, 4.1, "Please send the residence permit documents"), "Speaker 2"),
+            (Seg(5, 8, "The deadline is Friday."), "Speaker 2"),
+        };
+
+        var merged = SourceTrackAttribution.Merge(local, remote);
+
+        Assert.Equal(3, merged.Count);
+        Assert.DoesNotContain(merged, item => item.Speaker == "Anastasia" && item.Segment.Text.StartsWith("Please"));
+        Assert.Contains(merged, item => item.Speaker == "Anastasia" && item.Segment.Text.StartsWith("Yes"));
+    }
+
+    [Fact]
+    public void AutoDiarizationFoldsTinyPhantomIntoNearestRealSpeaker()
+    {
+        var segments = new[]
+        {
+            new SpeakerDiarizer.RawSpeakerSegment(1, 0, 100),
+            new SpeakerDiarizer.RawSpeakerSegment(7, 100.1, 101),
+            new SpeakerDiarizer.RawSpeakerSegment(2, 101.1, 201),
+        };
+
+        var cleaned = SpeakerDiarizer.MergePhantomSpeakers(segments);
+
+        Assert.DoesNotContain(cleaned, segment => segment.Speaker == 7);
+        Assert.Equal(2, cleaned.Select(segment => segment.Speaker).Distinct().Count());
     }
 
     [Fact]

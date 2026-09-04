@@ -16,9 +16,13 @@ public class MarkdownWriterTests
                 Model = "large-v3-turbo",
                 Language = "en",
                 Tracks = ["microphone.wav", "system.wav"],
+                Attribution = "dual-tracks",
+                ExpectedSpeakers = 2,
             });
 
         Assert.Contains("source_path: \"C:\\\\Users\\\\Person\\\\call.m4a\"", markdown);
         Assert.Contains("tracks: [\"microphone.wav\", \"system.wav\"]", markdown);
+        Assert.Contains("attribution: dual-tracks", markdown);
+        Assert.Contains("expected_speakers: 2", markdown);
     }
 }

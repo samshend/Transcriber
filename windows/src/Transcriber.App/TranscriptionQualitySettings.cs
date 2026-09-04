@@ -92,6 +92,21 @@ internal static class ModelDownloader
 internal sealed class TranscriptionSettings
 {
     public TranscriptionQuality Quality { get; set; } = TranscriptionQuality.MoreAccurate;
+    public string UserName { get; set; } = string.Empty;
+    public string WorkArea { get; set; } = "General";
+    public string CustomVocabulary { get; set; } = string.Empty;
+    public bool HasCompletedOnboarding { get; set; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string Vocabulary
+    {
+        get
+        {
+            var preset = WorkAreaVocabulary.TermsFor(WorkArea);
+            return string.Join(", ", new[] { preset, CustomVocabulary.Trim() }
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+        }
+    }
 
     private static string PathName => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -111,4 +126,37 @@ internal sealed class TranscriptionSettings
         Directory.CreateDirectory(Path.GetDirectoryName(PathName)!);
         File.WriteAllText(PathName, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
     }
+}
+
+internal static class WorkAreaVocabulary
+{
+    public static readonly IReadOnlyList<string> Areas =
+    [
+        "General",
+        "Legal & immigration",
+        "Legal services",
+        "Technology & software",
+        "Finance & accounting",
+        "Healthcare",
+    ];
+
+    public static string TermsFor(string area) => area switch
+    {
+        "Legal & immigration" =>
+            "NIE, TIE, empadronamiento, extranjería, Beckham Law, residence permit, work permit, " +
+            "social security, consulate, citizenship, visa, apostille, digital certificate",
+        "Legal services" =>
+            "claimant, defendant, affidavit, deposition, counsel, jurisdiction, litigation, " +
+            "indemnity, injunction, settlement, due diligence",
+        "Technology & software" =>
+            "API, SDK, repository, deployment, Kubernetes, database, pull request, source code, " +
+            "authentication, infrastructure",
+        "Finance & accounting" =>
+            "EBITDA, cash flow, balance sheet, accounts payable, accounts receivable, audit, " +
+            "accrual, reconciliation, capital expenditure",
+        "Healthcare" =>
+            "diagnosis, prognosis, prescription, contraindication, referral, clinical, dosage, " +
+            "medical history, treatment plan",
+        _ => string.Empty,
+    };
 }

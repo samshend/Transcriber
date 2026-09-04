@@ -7,6 +7,9 @@ public readonly record struct SpeakerSegment(string Speaker, double Start, doubl
 /// <summary>Matches Whisper's timed text to the speaker timeline produced by diarization.</summary>
 public static class SpeakerAttribution
 {
+    public const double MaxUtteranceDuration = 12;
+    public const double UtterancePause = 0.8;
+
     public static string Resolve(TranscriptSegment segment, IReadOnlyList<SpeakerSegment> speakers)
     {
         if (speakers.Count == 0) return "Speaker 1";
@@ -31,6 +34,45 @@ public static class SpeakerAttribution
         _ when point > segment.End => point - segment.End,
         _ => 0,
     };
+
+    /// <summary>
+    /// Word timestamps are precise enough to expose a handover inside a Whisper segment but too
+    /// noisy to label independently. Group them into short punctuation/pause-bounded utterances,
+    /// then resolve each unit from all of its overlap with the diarization timeline.
+    /// </summary>
+    public static List<(TranscriptSegment Segment, string? Speaker)> AttributeUtterances(
+        IReadOnlyList<TranscriptSegment> words,
+        IReadOnlyList<SpeakerSegment> speakers)
+    {
+        var units = new List<TranscriptSegment>();
+        foreach (var word in words)
+        {
+            if (string.IsNullOrWhiteSpace(word.Text)) continue;
+            if (units.Count == 0)
+            {
+                units.Add(word);
+                continue;
+            }
+            var previous = units[^1];
+            var split = TranscriptMerger.EndsSentence(previous.Text) ||
+                word.Start - previous.End >= UtterancePause ||
+                word.End - previous.Start >= MaxUtteranceDuration;
+            if (split)
+            {
+                units.Add(word);
+            }
+            else
+            {
+                units[^1] = previous with
+                {
+                    End = Math.Max(previous.End, word.End),
+                    Text = previous.Text + " " + word.Text,
+                };
+            }
+        }
+        return units.Select(unit => (Segment: unit,
+            Speaker: speakers.Count == 0 ? null : (string?)Resolve(unit, speakers))).ToList();
+    }
 }
 
 /// <summary>Offline, local speaker diarization through sherpa-onnx.</summary>
@@ -69,10 +111,14 @@ public static class SpeakerDiarizer
         var result = diarizer.ProcessWithCallback(samples, callback, IntPtr.Zero);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var labels = new Dictionary<int, string>();
-        return result
+        var raw = result
             .OrderBy(segment => segment.Start)
-            .Select(segment =>
+            .Select(segment => new RawSpeakerSegment(segment.Speaker, segment.Start, segment.End))
+            .ToList();
+        if (numberOfSpeakers < 0) raw = MergePhantomSpeakers(raw);
+
+        var labels = new Dictionary<int, string>();
+        return raw.Select(segment =>
             {
                 if (!labels.TryGetValue(segment.Speaker, out var label))
                 {
@@ -82,6 +128,94 @@ public static class SpeakerDiarizer
                 return new SpeakerSegment(label, segment.Start, segment.End);
             })
             .ToList();
+    }
+
+    public readonly record struct RawSpeakerSegment(int Speaker, double Start, double End)
+    {
+        public double Duration => Math.Max(0, End - Start);
+    }
+
+    /// <summary>
+    /// Auto-clustering occasionally invents a speaker for a few seconds of noise or a short
+    /// acknowledgement. Fold only clusters that are both under 3% of speech and under 45 seconds
+    /// into the nearest established neighbour. Exact-count diarization never uses this heuristic.
+    /// </summary>
+    public static List<RawSpeakerSegment> MergePhantomSpeakers(
+        IReadOnlyList<RawSpeakerSegment> segments,
+        double maxShare = 0.03,
+        double maxDuration = 45)
+    {
+        if (segments.Count < 2) return segments.ToList();
+        var durations = segments.GroupBy(segment => segment.Speaker)
+            .ToDictionary(group => group.Key, group => group.Sum(segment => segment.Duration));
+        if (durations.Count <= 2) return segments.ToList();
+        var total = durations.Values.Sum();
+        if (total <= 0) return segments.ToList();
+        var phantoms = durations
+            .Where(pair => pair.Value / total < maxShare && pair.Value < maxDuration)
+            .Select(pair => pair.Key)
+            .ToHashSet();
+        if (phantoms.Count == 0 || durations.Count - phantoms.Count < 2) return segments.ToList();
+
+        var cleaned = segments.ToList();
+        for (var index = 0; index < cleaned.Count; index++)
+        {
+            if (!phantoms.Contains(cleaned[index].Speaker)) continue;
+            (int Speaker, double Gap)? previous = null;
+            (int Speaker, double Gap)? next = null;
+            for (var candidate = index - 1; candidate >= 0; candidate--)
+            {
+                if (phantoms.Contains(cleaned[candidate].Speaker)) continue;
+                previous = (cleaned[candidate].Speaker, cleaned[index].Start - cleaned[candidate].End);
+                break;
+            }
+            for (var candidate = index + 1; candidate < cleaned.Count; candidate++)
+            {
+                if (phantoms.Contains(cleaned[candidate].Speaker)) continue;
+                next = (cleaned[candidate].Speaker, cleaned[candidate].Start - cleaned[index].End);
+                break;
+            }
+            var replacement = previous is not null && next is not null
+                ? (previous.Value.Gap <= next.Value.Gap ? previous.Value.Speaker : next.Value.Speaker)
+                : previous?.Speaker ?? next?.Speaker;
+            if (replacement is { } speaker) cleaned[index] = cleaned[index] with { Speaker = speaker };
+        }
+        return cleaned;
+    }
+}
+
+/// <summary>Combines isolated source-track results and removes obvious acoustic echo copies.</summary>
+public static class SourceTrackAttribution
+{
+    public static List<(TranscriptSegment Segment, string? Speaker)> Merge(
+        IReadOnlyList<(TranscriptSegment Segment, string? Speaker)> local,
+        IReadOnlyList<(TranscriptSegment Segment, string? Speaker)> remote)
+    {
+        var localWithoutEcho = local.Where(candidate => !remote.Any(other =>
+            MeaningfulOverlap(candidate.Segment, other.Segment) &&
+            WordSimilarity(candidate.Segment.Text, other.Segment.Text) >= 0.65)).ToList();
+        return localWithoutEcho.Concat(remote).OrderBy(item => item.Segment.Start).ToList();
+    }
+
+    private static bool MeaningfulOverlap(TranscriptSegment left, TranscriptSegment right)
+    {
+        var overlap = Math.Min(left.End, right.End) - Math.Max(left.Start, right.Start);
+        var shorter = Math.Min(left.End - left.Start, right.End - right.Start);
+        return overlap > 0 && shorter > 0 && overlap / shorter >= 0.5;
+    }
+
+    internal static double WordSimilarity(string left, string right)
+    {
+        static HashSet<string> Words(string value) => System.Text.RegularExpressions.Regex
+            .Matches(value.ToLowerInvariant(), @"[\p{L}\p{N}]+")
+            .Select(match => match.Value)
+            .Where(word => word.Length > 1)
+            .ToHashSet();
+        var a = Words(left);
+        var b = Words(right);
+        if (a.Count == 0 || b.Count == 0) return 0;
+        var intersection = a.Intersect(b).Count();
+        return 2d * intersection / (a.Count + b.Count);
     }
 }
 

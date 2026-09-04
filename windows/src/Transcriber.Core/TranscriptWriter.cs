@@ -13,6 +13,8 @@ public sealed record TranscriptMetadata
     public IReadOnlyList<string> Speakers { get; init; } = [];
     public string? RecordingWarning { get; init; }
     public IReadOnlyList<string> Tracks { get; init; } = [];
+    public string? Attribution { get; init; }
+    public int ExpectedSpeakers { get; init; } = -1;
 }
 
 /// <summary>
@@ -56,6 +58,8 @@ public static class MarkdownWriter
             var names = string.Join(", ", meta.Tracks.Select(t => $"\"{Escape(t)}\""));
             text.Append($"tracks: [{names}]\n");
         }
+        if (!string.IsNullOrEmpty(meta.Attribution)) text.Append($"attribution: {meta.Attribution}\n");
+        if (meta.ExpectedSpeakers > 0) text.Append($"expected_speakers: {meta.ExpectedSpeakers}\n");
         text.Append("---\n\n");
 
         var title = Path.GetFileNameWithoutExtension(meta.SourceFileName);

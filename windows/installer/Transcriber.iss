@@ -95,6 +95,7 @@ begin
     SettingsDir := ExpandConstant('{localappdata}\Transcriber');
     ForceDirectories(SettingsDir);
     SettingsJson := Format('{"Quality":%d}', [ModelPage.SelectedValueIndex]);
-    SaveStringToFile(SettingsDir + '\settings.json', SettingsJson, False);
+    if not FileExists(SettingsDir + '\settings.json') then
+      SaveStringToFile(SettingsDir + '\settings.json', SettingsJson, False);
   end;
 end;

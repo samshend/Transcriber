@@ -21,6 +21,7 @@ public sealed partial class MainWindow : Window
     private int _detailVersion;
     private bool _allowClose;
     private bool _closeCancellationInProgress;
+    private bool _onboardingShown;
 
     private const string VadFile = "ggml-silero-v5.1.2.bin";
 
@@ -226,6 +227,65 @@ public sealed partial class MainWindow : Window
 
     // MARK: - Toolbar actions
 
+    private async void RootGrid_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (_onboardingShown || _settings.HasCompletedOnboarding) return;
+        _onboardingShown = true;
+        await ShowOnboardingAsync();
+    }
+
+    private async Task ShowOnboardingAsync()
+    {
+        var name = new TextBox
+        {
+            Header = "Your name",
+            PlaceholderText = "Used for your microphone track in transcripts",
+            Text = _settings.UserName,
+        };
+        var workArea = CreateWorkAreaSelector(_settings.WorkArea);
+        var customVocabulary = new TextBox
+        {
+            Header = "Additional names or specialist terms (optional)",
+            PlaceholderText = "Names, organisations, abbreviations…",
+            Text = _settings.CustomVocabulary,
+            TextWrapping = TextWrapping.Wrap,
+            AcceptsReturn = true,
+            MinHeight = 70,
+        };
+        var explanation = new TextBlock
+        {
+            Text = "These details stay on this computer. Your work area adds a small vocabulary hint to improve recognition; it does not restrict what can be transcribed.",
+            TextWrapping = TextWrapping.Wrap,
+        };
+        var panel = new StackPanel { Spacing = 12, Width = 460 };
+        panel.Children.Add(explanation);
+        panel.Children.Add(name);
+        panel.Children.Add(workArea);
+        panel.Children.Add(customVocabulary);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Set up Transcriber",
+            Content = panel,
+            PrimaryButtonText = "Continue",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        _settings.UserName = name.Text.Trim();
+        _settings.WorkArea = workArea.SelectedItem as string ?? "General";
+        _settings.CustomVocabulary = customVocabulary.Text.Trim();
+        _settings.HasCompletedOnboarding = true;
+        _settings.Save();
+    }
+
+    private static ComboBox CreateWorkAreaSelector(string selected)
+    {
+        var selector = new ComboBox { Header = "Where do you work?", HorizontalAlignment = HorizontalAlignment.Stretch };
+        foreach (var area in WorkAreaVocabulary.Areas) selector.Items.Add(area);
+        selector.SelectedItem = WorkAreaVocabulary.Areas.Contains(selected) ? selected : "General";
+        return selector;
+    }
+
     private void OpenLogs_Click(object sender, RoutedEventArgs e)
     {
         var directory = Path.Combine(
@@ -272,6 +332,25 @@ public sealed partial class MainWindow : Window
         panel.Children.Add(slider);
         panel.Children.Add(labels);
         panel.Children.Add(availability);
+        var userName = new TextBox
+        {
+            Header = "Your name in transcripts",
+            PlaceholderText = "You",
+            Text = _settings.UserName,
+            Margin = new Thickness(0, 12, 0, 0),
+        };
+        var workArea = CreateWorkAreaSelector(_settings.WorkArea);
+        var customVocabulary = new TextBox
+        {
+            Header = "Additional vocabulary",
+            Text = _settings.CustomVocabulary,
+            TextWrapping = TextWrapping.Wrap,
+            AcceptsReturn = true,
+            MinHeight = 60,
+        };
+        panel.Children.Add(userName);
+        panel.Children.Add(workArea);
+        panel.Children.Add(customVocabulary);
         var dialog = new ContentDialog
         {
             XamlRoot = Content.XamlRoot,
@@ -303,6 +382,10 @@ public sealed partial class MainWindow : Window
         if (!File.Exists(modelPath) && !await DownloadModelAsync(selected, modelPath)) return;
 
         _settings.Quality = quality;
+        _settings.UserName = userName.Text.Trim();
+        _settings.WorkArea = workArea.SelectedItem as string ?? "General";
+        _settings.CustomVocabulary = customVocabulary.Text.Trim();
+        _settings.HasCompletedOnboarding = true;
         _settings.Save();
         _tools = ToolPaths.FromAppDirectory(AppContext.BaseDirectory, selected.FileName, VadFile);
         Vm.StatusMessage = $"Transcription quality: {selected.Title}.";
@@ -416,13 +499,16 @@ public sealed partial class MainWindow : Window
             var result = await recording.StopAndFinalizeAsync(_tools.FFmpeg);
             RecordingSource.Text = "Transcribing recording…";
             RecordingWarningText.Text = result.Warning ?? string.Empty;
+            var expectedSpeakers = await PromptForSpeakerCountAsync(allowCancel: false);
             await Vm.ImportAsync(
                 result.FinalPath,
                 _tools,
                 language: "auto",
-                vocabulary: null,
+                vocabulary: _settings.Vocabulary,
                 recordingWarning: result.Warning,
-                tracks: result.SourceTracks.Select(Path.GetFileName).OfType<string>().ToList());
+                tracks: result.SourceTracks.Select(Path.GetFileName).OfType<string>().ToList(),
+                expectedSpeakers: expectedSpeakers ?? 2,
+                localSpeakerName: _settings.UserName);
             Vm.SelectedItem = Vm.Items.FirstOrDefault();
             ItemsList.SelectedItem = Vm.SelectedItem;
         }
@@ -544,8 +630,8 @@ public sealed partial class MainWindow : Window
         if (Vm.IsBusy || !IsSupportedMedia(path)) return;
         var expectedSpeakers = await PromptForSpeakerCountAsync();
         if (expectedSpeakers is null) return;
-        await Vm.ImportAsync(path, _tools, language: "auto", vocabulary: null,
-            expectedSpeakers: expectedSpeakers.Value);
+        await Vm.ImportAsync(path, _tools, language: "auto", vocabulary: _settings.Vocabulary,
+            expectedSpeakers: expectedSpeakers.Value, localSpeakerName: _settings.UserName);
     }
 
     private static bool IsSupportedMedia(string path) => new[]
@@ -716,7 +802,7 @@ public sealed partial class MainWindow : Window
         return await dialog.ShowAsync() == ContentDialogResult.Primary ? input.Text : null;
     }
 
-    private async Task<int?> PromptForSpeakerCountAsync()
+    private async Task<int?> PromptForSpeakerCountAsync(bool allowCancel = true)
     {
         var selector = new ComboBox { Header = "How many people are speaking?", SelectedIndex = 1 };
         foreach (var option in new[]
@@ -739,7 +825,7 @@ public sealed partial class MainWindow : Window
             Title = "Speaker detection",
             Content = content,
             PrimaryButtonText = "Transcribe",
-            CloseButtonText = "Cancel",
+            CloseButtonText = allowCancel ? "Cancel" : string.Empty,
             DefaultButton = ContentDialogButton.Primary,
         };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return null;

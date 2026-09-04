@@ -50,7 +50,8 @@ public static class WhisperCommand
             "-f", wavPath,
             "-l", language,
             "-t", (threads ?? Environment.ProcessorCount).ToString(),
-            "-oj", "-of", outputBase,
+            "-ojf", "-of", outputBase,
+            "--max-len", "50", "--split-on-word",
             "--print-progress",
         };
         arguments.AddRange(AccuracyArguments(vadModelPath, vocabulary));
@@ -81,12 +82,17 @@ public static class WhisperCommand
         foreach (var segment in file.Transcription ?? [])
         {
             if (segment.Offsets is null) continue;
-            var text = (segment.Text ?? string.Empty).Trim();
-            if (text.Length == 0) continue;
-            segments.Add(new TranscriptSegment(
-                segment.Offsets.From / 1000.0,
-                segment.Offsets.To / 1000.0,
-                text));
+            var words = TimedWords(segment);
+            if (words.Count > 0) segments.AddRange(words);
+            else
+            {
+                var text = (segment.Text ?? string.Empty).Trim();
+                if (text.Length == 0) continue;
+                segments.Add(new TranscriptSegment(
+                    segment.Offsets.From / 1000.0,
+                    segment.Offsets.To / 1000.0,
+                    text));
+            }
         }
 
         return new WhisperResult(segments, file.Result?.Language);
@@ -102,6 +108,13 @@ public static class WhisperCommand
     {
         [JsonPropertyName("offsets")] public Offsets? Offsets { get; set; }
         [JsonPropertyName("text")] public string? Text { get; set; }
+        [JsonPropertyName("tokens")] public List<Token>? Tokens { get; set; }
+    }
+
+    private sealed class Token
+    {
+        [JsonPropertyName("text")] public string? Text { get; set; }
+        [JsonPropertyName("offsets")] public Offsets? Offsets { get; set; }
     }
 
     private sealed class Offsets
@@ -113,6 +126,47 @@ public static class WhisperCommand
     private sealed class ResultInfo
     {
         [JsonPropertyName("language")] public string? Language { get; set; }
+    }
+
+    /// <summary>
+    /// Full whisper JSON exposes timestamped tokens. With VAD their offsets are relative to the
+    /// current speech window, while the parent segment is on the original file timeline; align
+    /// the first lexical token to the segment start, then combine subword tokens into timed words.
+    /// </summary>
+    private static List<TranscriptSegment> TimedWords(Segment segment)
+    {
+        var tokens = (segment.Tokens ?? [])
+            .Where(token => token.Offsets is not null &&
+                !string.IsNullOrEmpty(token.Text) &&
+                !token.Text.StartsWith("[_", StringComparison.Ordinal))
+            .ToList();
+        if (tokens.Count == 0 || segment.Offsets is null) return [];
+
+        var firstOffset = tokens.Min(token => token.Offsets!.From);
+        var shift = segment.Offsets.From - firstOffset;
+        var words = new List<(long Start, long End, string Text)>();
+        foreach (var token in tokens)
+        {
+            var raw = token.Text!;
+            var beginsWord = char.IsWhiteSpace(raw[0]);
+            var text = raw.Trim();
+            if (text.Length == 0) continue;
+            var start = Math.Clamp(token.Offsets!.From + shift, segment.Offsets.From, segment.Offsets.To);
+            var end = Math.Clamp(token.Offsets.To + shift, start, segment.Offsets.To);
+            if (beginsWord || words.Count == 0)
+            {
+                words.Add((start, end, text));
+            }
+            else
+            {
+                var previous = words[^1];
+                words[^1] = (previous.Start, Math.Max(previous.End, end), previous.Text + text);
+            }
+        }
+        return words.Select(word => new TranscriptSegment(
+            word.Start / 1000.0,
+            Math.Max(word.End, word.Start + 50) / 1000.0,
+            word.Text)).ToList();
     }
 }
 

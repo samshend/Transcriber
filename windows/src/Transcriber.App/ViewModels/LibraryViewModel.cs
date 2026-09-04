@@ -181,7 +181,8 @@ public sealed partial class LibraryViewModel : ObservableObject
         string? vocabulary,
         string? recordingWarning = null,
         IReadOnlyList<string>? tracks = null,
-        int expectedSpeakers = -1)
+        int expectedSpeakers = -1,
+        string localSpeakerName = "You")
     {
         IsBusy = true;
         _processingCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -214,6 +215,7 @@ public sealed partial class LibraryViewModel : ObservableObject
                     RecordingWarning = recordingWarning,
                     Tracks = tracks ?? [],
                     ExpectedSpeakers = expectedSpeakers,
+                    LocalSpeakerName = localSpeakerName,
                     OutputDirectory = workDir,
                     LogPath = LastLogPath,
                 }, progress, cancellationToken)).ConfigureAwait(true);

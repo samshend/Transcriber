@@ -1,6 +1,6 @@
 # Windows feature gaps against macOS
 
-_Implementation audit, 2026-08-24. The macOS source is the product reference; the Windows
+_Implementation audit, updated 2026-09-04. The macOS source is the product reference; the Windows
 source was inspected as the implementation truth. Roadmap claims are not counted as shipped._
 
 ## Executive summary
@@ -24,7 +24,7 @@ a false sense that meetings are being captured safely.
 Verified on this Windows 11 machine:
 
 - .NET 10 and WinUI project build successfully with zero warnings.
-- All 48 `Transcriber.Core.Tests` tests pass.
+- All 58 `Transcriber.Core.Tests` tests pass.
 - The WinUI application launches.
 - FFmpeg, whisper.cpp, the large-v3-turbo model, and Silero VAD work end to end.
 - Import -> transcription -> Markdown/HTML -> managed library is implemented.
@@ -47,10 +47,10 @@ Verified on this Windows 11 machine:
 | Record -> transcribe | Finished recording automatically enters queue/library | **Implemented and hardware-tested** | Cancellation/progress polish remains |
 | Meeting-end assistance | Browser/app meeting detection, silence fallback, notification, optional auto-stop | Missing | P2 |
 | Meeting-start assistance | Detect call and suggest recording | Missing | P2 |
-| File import | Files and folders, recursive scanning, drag/drop | Single-file picker only | P1 |
+| File import | Files and folders, recursive scanning, drag/drop | File picker and audio drag/drop | Folder/batch import remains P1 |
 | Processing queue | Multiple jobs, explicit start/stop, per-stage rows, cancellation | One import processed immediately; global busy state | P1 |
-| Local transcription | Whisper, auto language, VAD, timestamps, vocabulary | Engine supports language/VAD/vocabulary; UI hard-codes auto language and no vocabulary | P1 settings/UI |
-| Speaker diarization | FluidAudio/CoreML speaker labels | **First slice:** native sherpa-onnx, pyannote segmentation + 3D-Speaker embeddings | P1 multi-speaker tuning/model licensing |
+| Local transcription | Whisper, auto language, VAD, timestamps, vocabulary | Three quality models; onboarding/settings supply profession and custom vocabulary hints | Language UI remains P1 |
+| Speaker diarization | FluidAudio/CoreML speaker labels | Native sherpa-onnx; asks for count; source-aware mic/remote attribution; mixed-audio phantom cleanup and utterance boundaries | Validate 3+ participants/model licensing |
 | Mixed-language mode | Per-turn detection and cleanup | Missing | P2 unless pilot calls require code-switching |
 | Rename speakers | Edit Speaker 1/2 labels | **Implemented:** context-menu form rewrites body/frontmatter and refreshes library | Validate UX on multi-speaker transcript |
 | Projects/library | Create/edit/delete projects with notes; move items | Core supports all; UI creates projects and drag-moves items, but has no edit/delete/notes UI | P1 |
@@ -61,8 +61,8 @@ Verified on this Windows 11 machine:
 | Search | Transcript indexing/search architecture | No Windows search UI/index | P2 |
 | Ask Claude/ChatGPT | Per-transcript handoff | Missing | P3; Copilot handoff matters more on Windows |
 | MCP server | List/search/read/queue transcripts | Missing | P3 |
-| Model management | Select/download models in app | Three installed models are selectable; download still happens during asset setup | P1 in-app download/recovery |
-| Settings | Models, language, VAD, vocabulary, speakers, recording, summaries, integrations | First settings slice: persisted Faster/Balanced/More accurate model slider | P1 remaining settings |
+| Model management | Select/download models in app | Installer downloads the selected model; changing quality later downloads the missing model in-app | Add pause/resume/recovery polish |
+| Settings | Models, language, VAD, vocabulary, speakers, recording, summaries, integrations | Quality, user name, work area, and custom vocabulary persist; first-run onboarding collects them | P1 remaining settings |
 | Background presence | Menu-bar controls and background monitoring | Missing | P2; Windows equivalent is tray icon |
 | Distribution | Bundled local tools in app build | Debug unpackaged build only; assets bundled into output | P1 after pilot usability |
 
@@ -82,7 +82,7 @@ bundled FFmpeg/Whisper tools. Automated hardware tests recorded both sources, re
 WAVs, produced an M4A, correctly recognized spoken microphone test phrases, ingested the
 transcript/audio, and left the WinUI app responsive. Pause/resume and confirmed discard were also
 exercised. Saved audio playback, codec-independent WAV preparation, and the native seek/progress
-control have been exercised on this machine. The test suite now contains 48 tests.
+control have been exercised on this machine. The test suite now contains 58 tests.
 
 This proves the architecture, not production reliability. The 60-90 minute soak test, endpoint
 changes, suspend/lock, low disk, and forced-source-failure cases below remain open.
@@ -95,9 +95,10 @@ changes, suspend/lock, low disk, and forced-source-failure cases below remain op
 3. The UI shows elapsed time, microphone activity, and whether system audio is active.
 4. The user can pause/resume, stop and save, or discard after confirmation.
 5. Stop finalizes the recording without freezing or presenting an empty window.
-6. The recording is copied into the managed library, filed into the selected project, and
+6. The app asks how many people participated; the known count constrains diarization.
+7. The recording is copied into the managed library, filed into the selected project, and
    transcribed automatically.
-7. The detail view exposes both the recording and transcript. Any capture anomaly is shown in the
+8. The detail view exposes both the recording and transcript. Any capture anomaly is shown in the
    UI and persisted in transcript frontmatter.
 
 ### Capture architecture
@@ -188,9 +189,12 @@ Exit: safe enough for supervised pilot meetings, with explicit limitations docum
 
 ### Phase 3 — conversation readability
 
-- Windows diarization and speaker rename workflow.
-- Prefer source-aware attribution for app recordings: mic is the local user; loopback is remote
-  participants. This is more deterministic than mixing first and diarizing the combined track.
+- **Implemented:** Windows diarization, speaker-count prompt, phantom-cluster cleanup, and speaker
+  rename workflow.
+- **Implemented:** source-aware attribution for app recordings. The named local user is fixed to
+  the mic track; the loopback track is diarized among the remaining participants. Mixed-file
+  imports use word timing grouped into short utterances to reduce boundary label swaps.
+- Validate source-aware attribution on retained two-track recordings and real 3+ participant calls.
 - Mixed-language support if real pilot material demonstrates the need.
 - Search and transcript rendering polish.
 
