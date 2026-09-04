@@ -75,6 +75,62 @@ public class TranscriptMergerTests
     }
 
     [Fact]
+    public void DualTrackMergeInterleavesChronologicallyByTag()
+    {
+        // Mirrors the real dual-track path: mic and system tracks are transcribed separately,
+        // each segment already knows its speaker with certainty, and the only job left is to
+        // lay both tracks out on one shared timeline in the order people actually spoke.
+        var tagged = new (TranscriptSegment Segment, string? Speaker)[]
+        {
+            (Seg(0, 5, "So, could you confirm your nationality?"), "Speaker 2"),
+            (Seg(5.5, 9, "German and Russian, so both."), "Speaker 1"),
+            (Seg(9.2, 13, "And where do you currently live?"), "Speaker 2"),
+        };
+
+        var blocks = TranscriptMerger.Merge(tagged);
+
+        Assert.Equal(3, blocks.Count);
+        Assert.Equal("Speaker 2", blocks[0].Speaker);
+        Assert.Equal("Speaker 1", blocks[1].Speaker);
+        Assert.Equal("Speaker 2", blocks[2].Speaker);
+    }
+
+    [Fact]
+    public void DualTrackMergeNeverBleedsASentenceAcrossASpeakerHandover()
+    {
+        // The real failure this guards against: a real recording glued "I already have one,
+        // actually. I made it in Germany." (the user, mic track) onto the end of the
+        // consultant's (system track) paragraph, because clustering misattributed the
+        // handover. With each segment's speaker known up front, that can't happen.
+        var tagged = new (TranscriptSegment Segment, string? Speaker)[]
+        {
+            (Seg(0, 20, "This will be your number for the whole of your life."), "Speaker 2"),
+            (Seg(20.4, 23, "I already have one, actually. I made it in Germany."), "Speaker 1"),
+        };
+
+        var blocks = TranscriptMerger.Merge(tagged);
+
+        Assert.Equal(2, blocks.Count);
+        Assert.DoesNotContain("I already have one", blocks[0].Text);
+        Assert.Contains("I already have one", blocks[1].Text);
+    }
+
+    [Fact]
+    public void DualTrackMergeStillCoalescesConsecutiveSameSpeakerSegments()
+    {
+        var tagged = new (TranscriptSegment Segment, string? Speaker)[]
+        {
+            (Seg(0, 5, "First part of the explanation,"), "Speaker 2"),
+            (Seg(5.3, 10, "continuing right along."), "Speaker 2"),
+        };
+
+        var blocks = TranscriptMerger.Merge(tagged);
+
+        Assert.Single(blocks);
+        Assert.Equal("First part of the explanation, continuing right along.", blocks[0].Text);
+    }
+
+    [Fact]
     public void ParagraphsDoNotSplitMidSentence()
     {
         // Segments run past the 120 s cap but the text has no sentence end until the last one,

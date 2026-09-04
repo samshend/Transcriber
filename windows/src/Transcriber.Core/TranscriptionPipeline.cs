@@ -90,77 +90,105 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
             var duration = await ProbeDurationAsync(request.SourcePath, cancellationToken).ConfigureAwait(false);
             log.Write($"PROBE duration_seconds={duration?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"}");
 
-            progress?.Report(new PipelineProgress(PipelineStage.Converting, null, "Converting audio…"));
-            log.Write("STAGE converting");
-            var wavPath = Path.Combine(workDirectory, "audio.wav");
-            await ProcessRunner.RunOrThrowAsync(
-                tools.FFmpeg,
-                ["-hide_banner", "-nostdin", "-y", "-i", request.SourcePath,
-                 "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wavPath],
-                "ffmpeg",
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+            // Deterministic attribution when the recording kept isolated mic/system tracks:
+            // transcribe each side separately and merge on the shared timeline, instead of
+            // guessing speakers by clustering the mix. Null for imported/mixed files or a
+            // dead/silent side — those fall through to the mix+clustering path below.
+            var dualTrack = request.Diarize
+                ? await TryDualTrackAsync(request, workDirectory, log, progress, cancellationToken).ConfigureAwait(false)
+                : null;
 
-            progress?.Report(new PipelineProgress(
-                PipelineStage.Transcribing, null, "Loading model and analyzing speech regions…"));
-            log.Write("STAGE whisper_start");
-            var outputBase = Path.Combine(workDirectory, "result");
-            await ProcessRunner.RunOrThrowAsync(
-                tools.WhisperCli,
-                WhisperCommand.BuildArguments(
-                    tools.ModelPath, wavPath, outputBase,
-                    request.Language, tools.VadModelPath, request.Vocabulary),
-                "whisper-cli",
-                line =>
-                {
-                    log.Write("WHISPER " + line);
-                    var fraction = WhisperCommand.ProgressFraction(line);
-                    if (fraction is not null)
-                    {
-                        progress?.Report(new PipelineProgress(
-                            PipelineStage.Transcribing, fraction, $"Transcribing… {(int)(fraction * 100)}%"));
-                    }
-                },
-                cancellationToken).ConfigureAwait(false);
-            log.Write("STAGE whisper_complete");
+            List<TranscriptBlock> blocks;
+            string? language;
+            int segmentCount;
 
-            var jsonPath = outputBase + ".json";
-            if (!File.Exists(jsonPath))
+            if (dualTrack is not null)
             {
-                throw new ToolFailure("whisper-cli", 0, "no transcript was produced");
+                progress?.Report(new PipelineProgress(PipelineStage.Writing, null, "Writing transcript…"));
+                log.Write($"STAGE dual_track_complete segments={dualTrack.Segments.Count}");
+                blocks = TranscriptMerger.Merge(dualTrack.Segments);
+                language = dualTrack.Languages.Count == 0
+                    ? request.Language
+                    : string.Join(", ", dualTrack.Languages);
+                segmentCount = dualTrack.Segments.Count;
             }
-
-            var recognised = WhisperCommand.ParseJson(
-                await File.ReadAllTextAsync(jsonPath, cancellationToken).ConfigureAwait(false));
-            if (recognised.Segments.Count == 0)
+            else
             {
-                throw new ToolFailure("whisper-cli", 0, "no speech was detected in this file");
-            }
+                progress?.Report(new PipelineProgress(PipelineStage.Converting, null, "Converting audio…"));
+                log.Write("STAGE converting");
+                var wavPath = Path.Combine(workDirectory, "audio.wav");
+                await ProcessRunner.RunOrThrowAsync(
+                    tools.FFmpeg,
+                    ["-hide_banner", "-nostdin", "-y", "-i", request.SourcePath,
+                     "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wavPath],
+                    "ffmpeg",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
 
-            IReadOnlyList<SpeakerSegment> speakerSegments = [];
-            if (request.Diarize && tools.DiarizationAvailable)
-            {
-                progress?.Report(new PipelineProgress(PipelineStage.Diarizing, 0, "Detecting speakers… 0%"));
-                log.Write("STAGE diarization_start");
-                speakerSegments = await Task.Run(() => SpeakerDiarizer.Process(
-                    wavPath,
-                    tools.DiarizationSegmentationModelPath!,
-                    tools.DiarizationEmbeddingModelPath!,
-                    fraction =>
+                progress?.Report(new PipelineProgress(
+                    PipelineStage.Transcribing, null, "Loading model and analyzing speech regions…"));
+                log.Write("STAGE whisper_start");
+                var outputBase = Path.Combine(workDirectory, "result");
+                await ProcessRunner.RunOrThrowAsync(
+                    tools.WhisperCli,
+                    WhisperCommand.BuildArguments(
+                        tools.ModelPath, wavPath, outputBase,
+                        request.Language, tools.VadModelPath, request.Vocabulary),
+                    "whisper-cli",
+                    line =>
                     {
-                        log.Write($"DIARIZATION progress={(int)(fraction * 100)}%");
-                        progress?.Report(new PipelineProgress(
-                            PipelineStage.Diarizing, fraction, $"Detecting speakers… {(int)(fraction * 100)}%"));
+                        log.Write("WHISPER " + line);
+                        var fraction = WhisperCommand.ProgressFraction(line);
+                        if (fraction is not null)
+                        {
+                            progress?.Report(new PipelineProgress(
+                                PipelineStage.Transcribing, fraction, $"Transcribing… {(int)(fraction * 100)}%"));
+                        }
                     },
-                    cancellationToken,
-                    numberOfSpeakers: request.ExpectedSpeakers), cancellationToken).ConfigureAwait(false);
-                log.Write($"STAGE diarization_complete segments={speakerSegments.Count}");
+                    cancellationToken).ConfigureAwait(false);
+                log.Write("STAGE whisper_complete");
+
+                var jsonPath = outputBase + ".json";
+                if (!File.Exists(jsonPath))
+                {
+                    throw new ToolFailure("whisper-cli", 0, "no transcript was produced");
+                }
+
+                var recognised = WhisperCommand.ParseJson(
+                    await File.ReadAllTextAsync(jsonPath, cancellationToken).ConfigureAwait(false));
+                if (recognised.Segments.Count == 0)
+                {
+                    throw new ToolFailure("whisper-cli", 0, "no speech was detected in this file");
+                }
+
+                IReadOnlyList<SpeakerSegment> speakerSegments = [];
+                if (request.Diarize && tools.DiarizationAvailable)
+                {
+                    progress?.Report(new PipelineProgress(PipelineStage.Diarizing, 0, "Detecting speakers… 0%"));
+                    log.Write("STAGE diarization_start");
+                    speakerSegments = await Task.Run(() => SpeakerDiarizer.Process(
+                        wavPath,
+                        tools.DiarizationSegmentationModelPath!,
+                        tools.DiarizationEmbeddingModelPath!,
+                        fraction =>
+                        {
+                            log.Write($"DIARIZATION progress={(int)(fraction * 100)}%");
+                            progress?.Report(new PipelineProgress(
+                                PipelineStage.Diarizing, fraction, $"Detecting speakers… {(int)(fraction * 100)}%"));
+                        },
+                        cancellationToken,
+                        numberOfSpeakers: request.ExpectedSpeakers), cancellationToken).ConfigureAwait(false);
+                    log.Write($"STAGE diarization_complete segments={speakerSegments.Count}");
+                }
+
+                progress?.Report(new PipelineProgress(PipelineStage.Writing, null, "Writing transcript…"));
+                log.Write("STAGE writing");
+                blocks = TranscriptMerger.Merge(
+                    recognised.Segments,
+                    speakerSegments.Count == 0 ? null : segment => SpeakerAttribution.Resolve(segment, speakerSegments));
+                language = recognised.Language ?? request.Language;
+                segmentCount = recognised.Segments.Count;
             }
 
-            progress?.Report(new PipelineProgress(PipelineStage.Writing, null, "Writing transcript…"));
-            log.Write("STAGE writing");
-            var blocks = TranscriptMerger.Merge(
-                recognised.Segments,
-                speakerSegments.Count == 0 ? null : segment => SpeakerAttribution.Resolve(segment, speakerSegments));
             var speakers = blocks.Select(block => block.Speaker).OfType<string>().Distinct().ToList();
 
             var source = new FileInfo(request.SourcePath);
@@ -170,7 +198,7 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
                 SourcePath = source.FullName,
                 DurationSeconds = duration,
                 Model = Path.GetFileNameWithoutExtension(tools.ModelPath).Replace("ggml-", string.Empty),
-                Language = recognised.Language ?? request.Language,
+                Language = language,
                 RecordingWarning = request.RecordingWarning,
                 Tracks = request.Tracks,
                 Speakers = speakers,
@@ -188,9 +216,9 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
                 .ConfigureAwait(false);
 
             progress?.Report(new PipelineProgress(PipelineStage.Done, 1));
-            log.Write($"DONE segments={recognised.Segments.Count} blocks={blocks.Count} speakers={speakers.Count}");
+            log.Write($"DONE segments={segmentCount} blocks={blocks.Count} speakers={speakers.Count}");
             return new TranscriptionOutcome(
-                markdownPath, htmlPath, recognised.Segments.Count, blocks.Count,
+                markdownPath, htmlPath, segmentCount, blocks.Count,
                 meta.Language, duration);
         }
         finally
@@ -198,6 +226,104 @@ public sealed class TranscriptionPipeline(ToolPaths tools)
             try { Directory.Delete(workDirectory, recursive: true); } catch { /* best effort */ }
         }
     }
+
+    /// <summary>
+    /// Looks for the isolated <c>microphone.wav</c>/<c>system.wav</c> siblings a recording
+    /// leaves next to its merged <c>.m4a</c> (see <c>RecordingSession.cs</c>) and, if both carry
+    /// real audio, transcribes each separately instead of clustering the mix. Returns null for
+    /// imported/mixed files (no siblings) or a dead/silent side (e.g. denied system-audio
+    /// capture) — those fall back to the existing mix+clustering path unchanged.
+    /// </summary>
+    private async Task<DualTrackResult?> TryDualTrackAsync(
+        TranscriptionRequest request,
+        string workDirectory,
+        PipelineLog log,
+        IProgress<PipelineProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var folder = Path.GetDirectoryName(request.SourcePath);
+        if (folder is null) return null;
+        var micPath = Path.Combine(folder, "microphone.wav");
+        var systemPath = Path.Combine(folder, "system.wav");
+        if (!File.Exists(micPath) || !File.Exists(systemPath)) return null;
+
+        var micDuration = await ProbeDurationAsync(micPath, cancellationToken).ConfigureAwait(false);
+        var systemDuration = await ProbeDurationAsync(systemPath, cancellationToken).ConfigureAwait(false);
+        if (micDuration is not > 1 || systemDuration is not > 1) return null;
+
+        log.Write("STAGE dual_track_attribution");
+        progress?.Report(new PipelineProgress(PipelineStage.Transcribing, 0, "Transcribing your side…"));
+        var mic = await TranscribeTrackAsync(
+            "Speaker 1", micPath, workDirectory, request,
+            fraction => progress?.Report(new PipelineProgress(
+                PipelineStage.Transcribing, fraction * 0.5, $"Transcribing your side… {(int)(fraction * 100)}%")),
+            log, cancellationToken).ConfigureAwait(false);
+
+        progress?.Report(new PipelineProgress(PipelineStage.Transcribing, 0.5, "Transcribing the other side…"));
+        var system = await TranscribeTrackAsync(
+            "Speaker 2", systemPath, workDirectory, request,
+            fraction => progress?.Report(new PipelineProgress(
+                PipelineStage.Transcribing, 0.5 + fraction * 0.5, $"Transcribing the other side… {(int)(fraction * 100)}%")),
+            log, cancellationToken).ConfigureAwait(false);
+
+        var tagged = mic.Tagged.Concat(system.Tagged).OrderBy(t => t.Segment.Start).ToList();
+        var languages = new[] { mic.Language, system.Language }.OfType<string>().Distinct().ToList();
+        return new DualTrackResult(tagged, languages);
+    }
+
+    private async Task<TrackResult> TranscribeTrackAsync(
+        string speaker,
+        string trackPath,
+        string workDirectory,
+        TranscriptionRequest request,
+        Action<double> onProgress,
+        PipelineLog log,
+        CancellationToken cancellationToken)
+    {
+        var safe = speaker.Replace(' ', '_');
+        var wavPath = Path.Combine(workDirectory, safe + ".wav");
+        await ProcessRunner.RunOrThrowAsync(
+            tools.FFmpeg,
+            ["-hide_banner", "-nostdin", "-y", "-i", trackPath,
+             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wavPath],
+            "ffmpeg",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        var outputBase = Path.Combine(workDirectory, safe + "-result");
+        await ProcessRunner.RunOrThrowAsync(
+            tools.WhisperCli,
+            WhisperCommand.BuildArguments(
+                tools.ModelPath, wavPath, outputBase,
+                request.Language, tools.VadModelPath, request.Vocabulary),
+            "whisper-cli",
+            line =>
+            {
+                log.Write($"WHISPER[{speaker}] " + line);
+                var fraction = WhisperCommand.ProgressFraction(line);
+                if (fraction is not null) onProgress(fraction.Value);
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        var jsonPath = outputBase + ".json";
+        if (!File.Exists(jsonPath))
+        {
+            throw new ToolFailure("whisper-cli", 0, $"no transcript was produced for {speaker}");
+        }
+        var recognised = WhisperCommand.ParseJson(
+            await File.ReadAllTextAsync(jsonPath, cancellationToken).ConfigureAwait(false));
+        var tagged = recognised.Segments
+            .Select(segment => (Segment: segment, Speaker: (string?)speaker))
+            .ToList();
+        return new TrackResult(tagged, recognised.Language);
+    }
+
+    private sealed record DualTrackResult(
+        List<(TranscriptSegment Segment, string? Speaker)> Segments,
+        IReadOnlyList<string> Languages);
+
+    private sealed record TrackResult(
+        List<(TranscriptSegment Segment, string? Speaker)> Tagged,
+        string? Language);
 
     /// <summary>ffmpeg prints "Duration: 00:44:42.06" on stderr; there is no ffprobe bundled.</summary>
     private async Task<double?> ProbeDurationAsync(string path, CancellationToken cancellationToken)

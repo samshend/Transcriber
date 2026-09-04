@@ -44,15 +44,26 @@ public static class TranscriptMerger
     public static List<TranscriptBlock> Merge(
         IEnumerable<TranscriptSegment> segments,
         Func<TranscriptSegment, string?>? speakerAt = null)
+        => MergeCore(segments.Select(segment => (Segment: segment, Speaker: speakerAt?.Invoke(segment))));
+
+    /// <summary>
+    /// For dual-track attribution, where each segment already carries the speaker its own
+    /// track was recorded for — mic and system-audio are two physically separate sources, so
+    /// there's no time-based resolution to do, just a chronological merge of both tracks'
+    /// segments. Pass segments pre-sorted by <see cref="TranscriptSegment.Start"/>.
+    /// </summary>
+    public static List<TranscriptBlock> Merge(IEnumerable<(TranscriptSegment Segment, string? Speaker)> taggedSegments)
+        => MergeCore(taggedSegments);
+
+    private static List<TranscriptBlock> MergeCore(IEnumerable<(TranscriptSegment Segment, string? Speaker)> tagged)
     {
         var blocks = new List<TranscriptBlock>();
 
-        foreach (var segment in segments)
+        foreach (var (segment, speaker) in tagged)
         {
             var text = segment.Text.Trim();
             if (text.Length == 0) continue;
 
-            var speaker = speakerAt?.Invoke(segment);
             var last = blocks.Count > 0 ? blocks[^1] : null;
 
             var continues =
